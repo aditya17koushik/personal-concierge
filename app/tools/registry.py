@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 from typing import Any
@@ -16,7 +17,7 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.to_openai() for tool in self._tools.values()]
 
-    def execute(
+    async def execute(
         self, name: str, arguments: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
         """Run a tool. Never raises: errors are returned so the LLM can recover."""
@@ -39,7 +40,10 @@ class ToolRegistry:
             }
 
         try:
-            return tool.handler(ctx, args)
+            result = tool.handler(ctx, args)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         except Exception:
             logger.exception("Tool %s failed", name)
             ctx.db.rollback()
@@ -47,6 +51,8 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
+    from app.tools.calendar.tools import CALENDAR_TOOLS
     from app.tools.expenses.tools import EXPENSE_TOOLS
+    from app.tools.gmail.tools import GMAIL_TOOLS
 
-    return ToolRegistry([*EXPENSE_TOOLS])
+    return ToolRegistry([*EXPENSE_TOOLS, *GMAIL_TOOLS, *CALENDAR_TOOLS])

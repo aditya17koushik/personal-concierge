@@ -182,16 +182,17 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | --- | --- | --- |
 | 1 | Repository foundation (FastAPI, PostgreSQL, SQLAlchemy, Alembic, Pydantic, config, logging) | Done |
 | 2 | LLM abstraction (OpenAI, Ollama) | Done |
-| 3 | `POST /agent/chat` | Next |
-| 4 | Langfuse | Planned |
-| 5 | Expense tools + database | Planned |
-| 6 | Jev decision layer | Planned |
-| 7 | Google OAuth | Planned |
-| 8 | Gmail read/search | Planned |
-| 9 | Google Calendar | Planned |
+| 3 | `POST /agent/chat` | Done |
+| 4 | Langfuse | Deferred (after Jev and Hermes) |
+| 5 | Expense tools + database | Done |
+| 6 | Google OAuth | Done |
+| 7 | Gmail read/search (read-only) | Done |
+| 8 | Google Calendar (read-only) | Done |
+| 9 | Jev decision layer | Next |
 | 10 | Approval system | Planned |
 | 11 | Hermes integration | Planned |
 | 12 | Telegram | Planned |
 | 13 | WhatsApp | Planned |
 | 14 | Memory | Planned |
 | 15 | Advanced personal planning | Planned |
+

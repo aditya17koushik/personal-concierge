@@ -11,6 +11,6 @@ openai
 langfuse
 pytest
 pytest-asyncio
-
+cryptography
 
 

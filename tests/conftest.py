@@ -1,6 +1,12 @@
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-not-for-production")
+os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
+os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
+os.environ.setdefault(
+    "GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/google/callback"
+)
 
 from typing import Iterator
 

@@ -20,13 +20,20 @@ TODAY = date(2026, 10, 9)
 @pytest.fixture
 def ctx(db: Session) -> ToolContext:
     user = UserRepository(db).get_or_create("tester")
-    return ToolContext(db=db, user_id=user.id, today=TODAY, default_currency="INR")
+    return ToolContext(
+        db=db,
+        user_id=user.id,
+        today=TODAY,
+        default_currency="INR",
+        external_user_id="tester",
+    )
 
 
-def test_add_expense_defaults(ctx: ToolContext):
+@pytest.mark.asyncio
+async def test_add_expense_defaults(ctx: ToolContext):
     registry = build_default_registry()
 
-    result = registry.execute(
+    result = await registry.execute(
         "add_expense", {"amount": 250.5, "category": " Food "}, ctx
     )
 
@@ -37,36 +44,45 @@ def test_add_expense_defaults(ctx: ToolContext):
     assert saved["date"] == "2026-10-09"
 
 
-def test_list_and_summary(ctx: ToolContext):
+@pytest.mark.asyncio
+async def test_list_and_summary(ctx: ToolContext):
     registry = build_default_registry()
-    registry.execute("add_expense", {"amount": 100, "category": "food"}, ctx)
-    registry.execute("add_expense", {"amount": 50, "category": "food"}, ctx)
-    registry.execute(
-        "add_expense", {"amount": 30, "category": "transport", "spent_on": "2026-10-01"}, ctx
+    await registry.execute("add_expense", {"amount": 100, "category": "food"}, ctx)
+    await registry.execute("add_expense", {"amount": 50, "category": "food"}, ctx)
+    await registry.execute(
+        "add_expense",
+        {"amount": 30, "category": "transport", "spent_on": "2026-10-01"},
+        ctx,
     )
-    registry.execute(
-        "add_expense", {"amount": 999, "category": "rent", "spent_on": "2026-09-30"}, ctx
+    await registry.execute(
+        "add_expense",
+        {"amount": 999, "category": "rent", "spent_on": "2026-09-30"},
+        ctx,
     )
 
-    listed = registry.execute("list_expenses", {"category": "food"}, ctx)
+    listed = await registry.execute("list_expenses", {"category": "food"}, ctx)
     assert listed["count"] == 2
 
-    summary = registry.execute("get_expense_summary", {}, ctx)  # this month
+    summary = await registry.execute("get_expense_summary", {}, ctx)  # this month
     totals = {r["category"]: r["total"] for r in summary["by_category"]}
     assert totals == {"food": "150.00", "transport": "30.00"}
     assert summary["grand_total_by_currency"] == {"INR": "180.00"}
 
 
-def test_users_are_isolated(db: Session, ctx: ToolContext):
+@pytest.mark.asyncio
+async def test_users_are_isolated(db: Session, ctx: ToolContext):
     registry = build_default_registry()
-    registry.execute("add_expense", {"amount": 10, "category": "food"}, ctx)
+    await registry.execute("add_expense", {"amount": 10, "category": "food"}, ctx)
 
     other = UserRepository(db).get_or_create("someone-else")
-    other_ctx = ToolContext(db=db, user_id=other.id, today=TODAY, default_currency="INR")
+    other_ctx = ToolContext(
+        db=db, user_id=other.id, today=TODAY, default_currency="INR"
+    )
 
-    assert registry.execute("list_expenses", {}, other_ctx)["count"] == 0
+    assert (await registry.execute("list_expenses", {}, other_ctx))["count"] == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "name,args",
     [
@@ -76,10 +92,10 @@ def test_users_are_isolated(db: Session, ctx: ToolContext):
         ("does_not_exist", {}),
     ],
 )
-def test_bad_calls_return_errors_not_exceptions(
+async def test_bad_calls_return_errors_not_exceptions(
     ctx: ToolContext, name: str, args: dict[str, Any]
 ):
-    result = build_default_registry().execute(name, args, ctx)
+    result = await build_default_registry().execute(name, args, ctx)
     assert "error" in result
 
 
