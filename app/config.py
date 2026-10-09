@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.2:latest"
 
+    # Expenses
+    default_currency: str = "INR"
+
     # Langfuse
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
