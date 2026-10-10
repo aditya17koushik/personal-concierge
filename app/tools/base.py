@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.decisions.schemas import Risk
+
 if TYPE_CHECKING:
     from app.integrations.google.oauth import GoogleOAuthService
 
@@ -31,6 +33,16 @@ class Tool:
     args_model: type[BaseModel]
     # handlers may be plain functions or coroutines
     handler: Callable[[ToolContext, Any], ToolResult | Awaitable[ToolResult]]
+
+    # Used by the Jev decision layer
+    domain: str  # "expense", "email", "calendar", ...
+    risk: Risk = "low"
+    side_effects: bool = False  # changes data or the outside world
+
+    @property
+    def requires_approval(self) -> bool:
+        """Such tools are never exposed to the model without an approval flow."""
+        return self.risk == "high" or (self.side_effects and self.risk == "medium")
 
     def to_openai(self) -> dict[str, Any]:
         return {

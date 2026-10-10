@@ -134,17 +134,21 @@ EXPENSE_TOOLS: list[Tool] = [
         description="Record a new expense for the user.",
         args_model=AddExpenseArgs,
         handler=add_expense,
+        domain="expense",
+        side_effects=True,
     ),
     Tool(
         name="list_expenses",
         description="List the user's recorded expenses, newest first, with optional filters.",
         args_model=ListExpensesArgs,
         handler=list_expenses,
+        domain="expense",
     ),
     Tool(
         name="get_expense_summary",
         description="Total the user's spending by category over a date range.",
         args_model=ExpenseSummaryArgs,
         handler=get_expense_summary,
+        domain="expense",
     ),
 ]

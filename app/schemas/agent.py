@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
+from app.decisions.schemas import Decision
+
 
 class ChatRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=255)
@@ -19,3 +21,4 @@ class ChatResponse(BaseModel):
     provider: str
     model: str
     tools_used: list[str] = Field(default_factory=list)
+    decision: Decision | None = None

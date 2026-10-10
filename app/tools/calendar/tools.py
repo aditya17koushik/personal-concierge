@@ -90,6 +90,7 @@ CALENDAR_TOOLS: list[Tool] = [
         ),
         args_model=ListEventsArgs,
         handler=list_events,
+        domain="calendar",
     ),
     Tool(
         name="get_event",
@@ -99,5 +100,6 @@ CALENDAR_TOOLS: list[Tool] = [
         ),
         args_model=GetEventArgs,
         handler=get_event,
+        domain="calendar",
     ),
 ]

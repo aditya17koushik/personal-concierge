@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # Expenses
     default_currency: str = "INR"
 
+    # TypeSafe AI (Jev decision model)
+    typesafe_api_key: str = ""
+    typesafe_base_url: str = "https://api.typesafe.ai"
+    jev_model: str = "jev-latest"  # pin e.g. "jev-1.13.0" in production
+    jev_timeout_seconds: float = 10.0
+    # Probability thresholds (Jev returns calibrated probabilities)
+    jev_domain_threshold: float = 0.6  # message needs this domain (email, ...)
+    jev_high_risk_threshold: float = 0.3  # P(high risk) at/above this => high risk
+    jev_refuse_threshold: float = 0.8  # clearly harmful
+
     # Langfuse
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

@@ -69,11 +69,13 @@ GMAIL_TOOLS: list[Tool] = [
         ),
         args_model=SearchEmailsArgs,
         handler=search_emails,
+        domain="email",
     ),
     Tool(
         name="read_email",
         description="Read the full text of one email by id (read-only).",
         args_model=ReadEmailArgs,
         handler=read_email,
+        domain="email",
     ),
 ]

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -123,8 +124,10 @@ class GoogleOAuthService:
                 "Please log in again and allow all of them."
             )
 
-        user = UserRepository(self._db).get_or_create(external_id)
-        existing = self._creds.get(user.id)
+        user = await asyncio.to_thread(
+            UserRepository(self._db).get_or_create, external_id
+        )
+        existing = await asyncio.to_thread(self._creds.get, user.id)
 
         refresh_token = tokens.get("refresh_token")
         if not refresh_token and existing:
@@ -137,7 +140,8 @@ class GoogleOAuthService:
 
         email = await self._fetch_email(access_token)
 
-        return self._creds.upsert(
+        return await asyncio.to_thread(
+            self._creds.upsert,
             user_id=user.id,
             google_email=email,
             access_token_enc=encrypt(access_token),
@@ -150,7 +154,7 @@ class GoogleOAuthService:
 
     async def get_access_token(self, user_id: int) -> str:
         """Return a valid access token for the user, refreshing if needed."""
-        cred = self._creds.get(user_id)
+        cred = await asyncio.to_thread(self._creds.get, user_id)
         if cred is None:
             raise GoogleNotConnectedError("Google account is not connected.")
 
@@ -175,7 +179,8 @@ class GoogleOAuthService:
             raise GoogleAuthError("Google did not return an access token.")
 
         new_refresh = tokens.get("refresh_token")
-        self._creds.update_access_token(
+        await asyncio.to_thread(
+            self._creds.update_access_token,
             cred,
             access_token_enc=encrypt(access_token),
             expires_at=_now() + timedelta(seconds=int(tokens.get("expires_in", 3600))),
@@ -197,8 +202,8 @@ class GoogleOAuthService:
         }
 
     async def disconnect(self, external_user_id: str) -> bool:
-        user = UserRepository(self._db).get(external_user_id)
-        cred = self._creds.get(user.id) if user else None
+        user = await asyncio.to_thread(UserRepository(self._db).get, external_user_id)
+        cred = await asyncio.to_thread(self._creds.get, user.id) if user else None
         if user is None or cred is None:
             return False
 
@@ -210,7 +215,7 @@ class GoogleOAuthService:
         except (CryptoError, httpx.HTTPError):
             logger.warning("Could not revoke Google token (continuing)")
 
-        return self._creds.delete(user.id)
+        return await asyncio.to_thread(self._creds.delete, user.id)
 
     # ----------------------------------------------------------- helpers
 

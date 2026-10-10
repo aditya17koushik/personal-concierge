@@ -1,7 +1,8 @@
+import asyncio
 import inspect
 import json
 import logging
-from typing import Any
+from typing import Any, Collection
 
 from pydantic import ValidationError
 
@@ -14,8 +15,20 @@ class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
         self._tools = {tool.name: tool for tool in tools}
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [tool.to_openai() for tool in self._tools.values()]
+    @property
+    def tools(self) -> list[Tool]:
+        return list(self._tools.values())
+
+    def domains(self) -> set[str]:
+        return {tool.domain for tool in self._tools.values()}
+
+    def schemas(self, names: Collection[str] | None = None) -> list[dict[str, Any]]:
+        """OpenAI tool schemas, optionally limited to the given tool names."""
+        return [
+            tool.to_openai()
+            for tool in self._tools.values()
+            if names is None or tool.name in names
+        ]
 
     async def execute(
         self, name: str, arguments: dict[str, Any], ctx: ToolContext
@@ -40,13 +53,18 @@ class ToolRegistry:
             }
 
         try:
-            result = tool.handler(ctx, args)
-            if inspect.isawaitable(result):
-                result = await result
+            if inspect.iscoroutinefunction(tool.handler):
+                result = await tool.handler(ctx, args)
+            else:
+                # Sync handlers do blocking database I/O. Run them in a worker
+                # thread so a slow database can never freeze the event loop.
+                result = await asyncio.to_thread(tool.handler, ctx, args)
+                if inspect.isawaitable(result):
+                    result = await result
             return result
         except Exception:
             logger.exception("Tool %s failed", name)
-            ctx.db.rollback()
+            await asyncio.to_thread(ctx.db.rollback)
             return {"error": "Tool failed unexpectedly"}
 
 

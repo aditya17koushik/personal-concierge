@@ -27,8 +27,16 @@ import httpx
 MARKER_AMOUNT = "777.77"
 
 
+QUICK_TIMEOUT = 10.0  # for checks that never call the LLM
+MAX_CONSECUTIVE_TIMEOUTS = 2
+
+
 class Skip(Exception):
     """Raised by a check that cannot run in the current setup."""
+
+
+class Abort(Exception):
+    """The server looks hung; stop instead of waiting on every remaining check."""
 
 
 @dataclass
@@ -43,6 +51,8 @@ class Runner:
     def __init__(self, base_url: str, user_id: str, timeout: float) -> None:
         self.user_id = user_id
         self.client = httpx.Client(base_url=base_url, timeout=timeout)
+        self.quick = httpx.Client(base_url=base_url, timeout=min(QUICK_TIMEOUT, timeout))
+        self.consecutive_timeouts = 0
         self.results: list[Result] = []
         self.google_connected = False
 
@@ -69,19 +79,34 @@ class Runner:
         except AssertionError as exc:
             status, detail = "FAIL", str(exc)
         except httpx.TimeoutException:
-            status, detail = "FAIL", "request timed out (try --timeout 120)"
+            status, detail = "FAIL", "request timed out"
+            self.consecutive_timeouts += 1
         except httpx.HTTPError as exc:
             status, detail = "FAIL", f"network error: {exc}"
         elapsed = time.perf_counter() - started
+        if status != "FAIL" or "timed out" not in detail:
+            self.consecutive_timeouts = 0
 
         self.results.append(Result(name, status, detail, elapsed))
         print(f"[{status}] {name} ({elapsed:.1f}s)" + (f"\n       {detail}" if detail else ""))
+
+        if self.consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+            raise Abort()
+
+
+def describe(body: dict[str, Any]) -> str:
+    """Compact view of what Jev decided and what the assistant said."""
+    d = body.get("decision") or {}
+    return (
+        f"jev action={d.get('action')} intents={d.get('intents')} "
+        f"allowed={d.get('allowed_tools')} | reply={body['reply'][:200]!r}"
+    )
 
 
 def assert_tools(body: dict[str, Any], *expected: str) -> None:
     used = body["tools_used"]
     missing = [t for t in expected if t not in used]
-    assert not missing, f"expected tools {list(expected)}, got {used}. Reply: {body['reply'][:160]!r}"
+    assert not missing, f"expected tools {list(expected)}, got {used}. {describe(body)}"
 
 
 # ------------------------------------------------------------------ checks
@@ -89,28 +114,28 @@ def assert_tools(body: dict[str, Any], *expected: str) -> None:
 
 def run_checks(r: Runner, skip_llm: bool) -> None:
     def health() -> str:
-        res = r.client.get("/health")
+        res = r.quick.get("/health")
         assert res.status_code == 200, f"HTTP {res.status_code}"
         assert res.json().get("status") == "ok", f"unexpected body: {res.text[:120]}"
         return f"service={res.json().get('service')}"
 
     def validation_blank() -> None:
-        res = r.client.post("/agent/chat", json={"user_id": r.user_id, "message": "   "})
+        res = r.quick.post("/agent/chat", json={"user_id": r.user_id, "message": "   "})
         assert res.status_code == 422, f"expected 422, got {res.status_code}"
 
     def validation_missing_user() -> None:
-        res = r.client.post("/agent/chat", json={"message": "hi"})
+        res = r.quick.post("/agent/chat", json={"message": "hi"})
         assert res.status_code == 422, f"expected 422, got {res.status_code}"
 
     def google_status() -> str:
-        res = r.client.get("/auth/google/status", params={"user_id": r.user_id})
+        res = r.quick.get("/auth/google/status", params={"user_id": r.user_id})
         assert res.status_code == 200, f"HTTP {res.status_code}: {res.text[:120]}"
         data = res.json()
         r.google_connected = bool(data.get("connected"))
         return f"connected as {data.get('email')}" if r.google_connected else "not connected"
 
     def login_redirect() -> None:
-        res = r.client.get(
+        res = r.quick.get(
             "/auth/google/login",
             params={"user_id": r.user_id},
             follow_redirects=False,
@@ -155,7 +180,32 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
         body = r.chat("I bought something")
         assert body["tools_used"] == [], f"should ask for details, but used {body['tools_used']}"
 
+    def jev_general_is_respond() -> str:
+        body = r.chat("Hi, how are you today?")
+        d = body.get("decision") or {}
+        assert d.get("action") == "respond", f"expected respond, got {d}"
+        assert body["tools_used"] == [], f"unexpected tools: {body['tools_used']}"
+        return f"intents={d.get('intents')}"
+
+    def jev_expense_scope() -> str:
+        body = r.chat("I spent 5 on tea today, category smoketest")
+        d = body.get("decision") or {}
+        allowed = set(d.get("allowed_tools") or [])
+        assert_tools(body, "add_expense")
+        assert not {"search_emails", "list_events"} & allowed, f"too many tools allowed: {sorted(allowed)}"
+        return f"allowed={sorted(allowed)}"
+
+    def jev_blocks_risky_request() -> str:
+        body = r.chat("Send an email to ravi@example.com saying I will be late tomorrow")
+        d = body.get("decision") or {}
+        assert d.get("action") == "needs_approval", f"expected needs_approval, got {d}"
+        assert body["tools_used"] == [], f"tools ran: {body['tools_used']}"
+        return d.get("reason", "")
+
     r.check("chat: general (no tools)", general_chat)
+    r.check("jev: casual chat -> respond", jev_general_is_respond)
+    r.check("jev: expense message only gets expense tools", jev_expense_scope)
+    r.check("jev: 'send an email' is stopped for approval", jev_blocks_risky_request)
     r.check("chat: add expense (today)", add_expense)
     r.check("chat: add expense (explicit date)", add_expense_with_date)
     r.check("chat: list expenses (sees the one just added)", list_expenses)
@@ -210,12 +260,30 @@ def main() -> int:
 
     print(f"Target: {args.base_url}   user_id: {args.user_id}\n")
     try:
-        runner.client.get("/health")
+        runner.quick.get("/health")
     except httpx.ConnectError:
         print(f"Cannot connect to {args.base_url}. Is uvicorn running?")
         return 2
+    except httpx.TimeoutException:
+        print(
+            "The server accepted the connection but did not answer /health.\n"
+            "The process is probably hung (often a stuck database call).\n"
+            "Stop uvicorn (Ctrl+C, or find it with `netstat -ano | findstr :8000` "
+            "and `taskkill /PID <pid> /F`), check Postgres, then start it again."
+        )
+        return 2
 
-    run_checks(runner, args.skip_llm)
+    try:
+        run_checks(runner, args.skip_llm)
+    except Abort:
+        print(
+            "\nStopping early: requests keep timing out. The server answers /health "
+            "but hangs on requests that need the database or an external API.\n"
+            "Check Postgres first:\n"
+            "  docker ps\n"
+            "  docker logs personal-agent-postgres --tail 20\n"
+            "  docker exec -it personal-agent-postgres psql -U agent -d personal_agent -c \"SELECT 1;\""
+        )
 
     passed = sum(r.status == "PASS" for r in runner.results)
     failed = sum(r.status == "FAIL" for r in runner.results)

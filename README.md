@@ -8,6 +8,7 @@ A personal AI agent backend built with FastAPI. It talks to an LLM (OpenAI by de
 - **Database:** PostgreSQL 17, SQLAlchemy, Alembic
 - **Validation / config:** Pydantic, pydantic-settings
 - **LLM:** OpenAI (`gpt-4o-mini`), Ollama (`llama3.2:latest`, disabled by default)
+- **Decision layer:** TypeSafe AI Jev (System One API), which returns typed decisions with calibrated probabilities
 - **Observability:** Langfuse (planned, Step 4)
 - **Tests:** pytest, pytest-asyncio
 
@@ -175,6 +176,14 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `TELEGRAM_BOT_TOKEN` | empty | Telegram bot (Step 12) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | empty | Google OAuth (Step 7) |
 | `APP_SECRET_KEY` | empty | Application secret |
+| `TYPESAFE_API_KEY` | empty | TypeSafe AI key for Jev. If empty, the app runs in read-only fallback mode |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | TypeSafe API root |
+| `JEV_MODEL` | `jev-latest` | Jev model. Aliases can move; pin e.g. `jev-1.13.0` in production |
+| `JEV_TIMEOUT_SECONDS` | `10` | Per-request timeout |
+| `JEV_DOMAIN_THRESHOLD` | `0.5` | Probability that a message needs a domain (email, ...) |
+| `JEV_HIGH_RISK_THRESHOLD` | `0.4` | P(high risk) at or above this counts as high risk |
+| `JEV_CLARIFY_THRESHOLD` | `0.6` | Probability that required details are missing |
+| `JEV_REFUSE_THRESHOLD` | `0.8` | Probability that a request is clearly harmful |
 
 ## Roadmap
 
@@ -188,8 +197,8 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | 6 | Google OAuth | Done |
 | 7 | Gmail read/search (read-only) | Done |
 | 8 | Google Calendar (read-only) | Done |
-| 9 | Jev decision layer | Next |
-| 10 | Approval system | Planned |
+| 9 | Jev decision layer | Done |
+| 10 | Approval system | Next |
 | 11 | Hermes integration | Planned |
 | 12 | Telegram | Planned |
 | 13 | WhatsApp | Planned |

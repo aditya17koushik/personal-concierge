@@ -32,8 +32,10 @@ class FakeProvider(LLMProvider):
         return LLMResponse(content="Hello from fake", model="fake-model")
 
 
-def make_client(provider: FakeProvider, db: Session) -> TestClient:
-    app.dependency_overrides[get_agent_service] = lambda: AgentService(provider, db)
+def make_client(provider: FakeProvider, db: Session, jev: Any) -> TestClient:
+    app.dependency_overrides[get_agent_service] = lambda: AgentService(
+        provider, db, jev=jev
+    )
     return TestClient(app)
 
 
@@ -43,19 +45,19 @@ def clear_overrides() -> Iterator[None]:
     app.dependency_overrides.clear()
 
 
-def test_chat_success(db: Session):
+def test_chat_success(db: Session, passthrough_jev):
     provider = FakeProvider()
-    client = make_client(provider, db)
+    client = make_client(provider, db, passthrough_jev)
 
     res = client.post("/agent/chat", json={"user_id": "u1", "message": "  hi  "})
 
     assert res.status_code == 200
-    assert res.json() == {
-        "reply": "Hello from fake",
-        "provider": "fake",
-        "model": "fake-model",
-        "tools_used": [],
-    }
+    body = res.json()
+    assert body["reply"] == "Hello from fake"
+    assert body["provider"] == "fake"
+    assert body["model"] == "fake-model"
+    assert body["tools_used"] == []
+    assert body["decision"]["action"] == "use_tools"
     assert provider.received[0].role == "system"
     assert provider.received[1].content == "hi"
 
@@ -69,13 +71,13 @@ def test_chat_success(db: Session):
         {"message": "hi"},
     ],
 )
-def test_chat_validation(payload: dict[str, str], db: Session):
-    client = make_client(FakeProvider(), db)
+def test_chat_validation(payload: dict[str, str], db: Session, passthrough_jev):
+    client = make_client(FakeProvider(), db, passthrough_jev)
     assert client.post("/agent/chat", json=payload).status_code == 422
 
 
-def test_chat_llm_failure_returns_502(db: Session):
-    client = make_client(FakeProvider(error=LLMError("boom")), db)
+def test_chat_llm_failure_returns_502(db: Session, passthrough_jev):
+    client = make_client(FakeProvider(error=LLMError("boom")), db, passthrough_jev)
 
     res = client.post("/agent/chat", json={"user_id": "u1", "message": "hi"})
 
