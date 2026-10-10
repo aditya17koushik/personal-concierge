@@ -103,6 +103,30 @@ uvicorn app.main:app --reload
 - Health check: http://localhost:8000/health
 - Interactive docs: http://localhost:8000/docs
 
+## Approvals
+
+Risky actions are never executed straight from a chat message. When Jev rates a request high risk
+and an approval-gated tool exists for it (today: `delete_expense`), the assistant only **proposes**
+the change:
+
+1. The model gets read-only lookup tools plus a proposal-only version of the risky tool.
+2. A proposal is stored in `pending_actions`. Nothing runs.
+3. The summary you approve is built by code from the validated arguments, not written by the model.
+4. The chat response lists `pending_approvals` (id, tool, summary, expiry).
+5. You decide:
+
+```
+GET  /approvals?user_id=me                      # pending by default; ?status=executed|rejected|expired|failed
+POST /approvals/{id}/approve?user_id=me         # runs it
+POST /approvals/{id}/reject?user_id=me
+```
+
+An approval runs at most once (atomic claim), expires after `APPROVAL_TTL_MINUTES`, and is scoped to
+its owner. A high-risk request with no approval-gated tool (for example "send an email") is declined.
+
+New approval-gated tools set `risk="high"` (or `medium` with `side_effects=True`) and must provide a
+`summarize` function; the registry refuses to start without one.
+
 ## Database migrations
 
 ```bash
@@ -176,13 +200,13 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `TELEGRAM_BOT_TOKEN` | empty | Telegram bot (Step 12) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | empty | Google OAuth (Step 7) |
 | `APP_SECRET_KEY` | empty | Application secret |
+| `APPROVAL_TTL_MINUTES` | `30` | How long a proposed action can be approved before it expires |
 | `TYPESAFE_API_KEY` | empty | TypeSafe AI key for Jev. If empty, the app runs in read-only fallback mode |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | TypeSafe API root |
 | `JEV_MODEL` | `jev-latest` | Jev model. Aliases can move; pin e.g. `jev-1.13.0` in production |
 | `JEV_TIMEOUT_SECONDS` | `10` | Per-request timeout |
-| `JEV_DOMAIN_THRESHOLD` | `0.5` | Probability that a message needs a domain (email, ...) |
-| `JEV_HIGH_RISK_THRESHOLD` | `0.4` | P(high risk) at or above this counts as high risk |
-| `JEV_CLARIFY_THRESHOLD` | `0.6` | Probability that required details are missing |
+| `JEV_DOMAIN_THRESHOLD` | `0.6` | Probability that a message needs a domain (email, ...) |
+| `JEV_HIGH_RISK_THRESHOLD` | `0.3` | P(high risk) at or above this counts as high risk |
 | `JEV_REFUSE_THRESHOLD` | `0.8` | Probability that a request is clearly harmful |
 
 ## Roadmap
@@ -198,8 +222,8 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | 7 | Gmail read/search (read-only) | Done |
 | 8 | Google Calendar (read-only) | Done |
 | 9 | Jev decision layer | Done |
-| 10 | Approval system | Next |
-| 11 | Hermes integration | Planned |
+| 10 | Approval system | Done |
+| 11 | Hermes integration | Next |
 | 12 | Telegram | Planned |
 | 13 | WhatsApp | Planned |
 | 14 | Memory | Planned |
