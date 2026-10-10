@@ -212,6 +212,47 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
     r.check("chat: monthly summary", summary)
     r.check("chat: missing amount -> asks, no tool", missing_amount)
 
+    def propose_delete(label: str) -> str:
+        """Adds an expense, asks to delete it, returns the pending approval id."""
+        assert_tools(r.chat(f"Add 9.99 for {label}, category smoketest"), "add_expense")
+        body = r.chat(f"Delete the 9.99 {label} expense")
+        d = body.get("decision") or {}
+        assert d.get("action") == "needs_approval", describe(body)
+        pending = body.get("pending_approvals") or []
+        assert pending, f"no pending approval was created. {describe(body)}"
+        assert "delete_expense" not in body["tools_used"], "deletion ran without approval!"
+        return str(pending[0]["id"])
+
+    def approval_approve() -> str:
+        approval_id = propose_delete("smoketest-approve")
+
+        listed = r.client.get("/approvals", params={"user_id": r.user_id}).json()
+        assert approval_id in [a["id"] for a in listed], "proposal not in the pending list"
+
+        res = r.client.post(f"/approvals/{approval_id}/approve", params={"user_id": r.user_id})
+        assert res.status_code == 200, f"approve -> HTTP {res.status_code}: {res.text[:160]}"
+        out = res.json()
+        assert out["status"] == "executed", f"status={out['status']} result={out.get('result')}"
+        assert "deleted" in (out.get("result") or {}), f"result={out.get('result')}"
+
+        replay = r.client.post(f"/approvals/{approval_id}/approve", params={"user_id": r.user_id})
+        assert replay.status_code == 409, f"replay should be 409, got {replay.status_code}"
+        return out["summary"]
+
+    def approval_reject() -> str:
+        approval_id = propose_delete("smoketest-reject")
+
+        res = r.client.post(f"/approvals/{approval_id}/reject", params={"user_id": r.user_id})
+        assert res.status_code == 200, f"reject -> HTTP {res.status_code}: {res.text[:160]}"
+        assert res.json()["status"] == "rejected"
+
+        listed = r.client.get("/approvals", params={"user_id": r.user_id}).json()
+        assert approval_id not in [a["id"] for a in listed], "rejected item still pending"
+        return "rejected, and no longer pending"
+
+    r.check("approval: propose -> approve -> executed (+ replay is 409)", approval_approve)
+    r.check("approval: propose -> reject -> nothing deleted", approval_reject)
+
     def need_google() -> None:
         if not r.google_connected:
             raise Skip(f"Google not connected for user '{r.user_id}' (use --user-id with a connected user)")

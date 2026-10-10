@@ -139,3 +139,38 @@ async def test_slow_google_credential_lookup_does_not_block_the_loop(
 
     assert token == "tok"
     assert gap < MAX_ALLOWED_GAP, f"event loop stalled for {gap:.2f}s"
+
+
+@pytest.mark.asyncio
+async def test_slow_approval_claim_does_not_block_the_loop(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+):
+    from decimal import Decimal
+
+    from app.approvals.service import ApprovalService
+    from app.database.repositories.approvals import ApprovalRepository
+    from app.database.repositories.expenses import ExpenseRepository
+    from app.tools.registry import build_default_registry
+
+    user = UserRepository(db).get_or_create("u1")
+    expense = ExpenseRepository(db).add(
+        user_id=user.id, amount=Decimal("1.00"), currency="INR",
+        category="food", description=None, spent_on=date(2026, 10, 9),
+    )
+    service = ApprovalService(db, build_default_registry())
+    ctx = ToolContext(db=db, user_id=user.id, today=date(2026, 10, 9), default_currency="INR")
+    _, pending = await service.propose(ctx, "delete_expense", {"expense_id": expense.id}, "x")
+    assert pending is not None
+
+    real_claim = ApprovalRepository.claim
+
+    def slow_claim(self: ApprovalRepository, approval_id: str) -> bool:
+        time.sleep(SLOW)
+        return real_claim(self, approval_id)
+
+    monkeypatch.setattr(ApprovalRepository, "claim", slow_claim)
+
+    out, gap = await measure_loop_gap(service.approve("u1", pending.id))
+
+    assert out.status == "executed"
+    assert gap < MAX_ALLOWED_GAP, f"event loop stalled for {gap:.2f}s"

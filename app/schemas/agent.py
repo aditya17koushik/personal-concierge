@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
 from app.decisions.schemas import Decision
+from app.schemas.approvals import PendingApprovalOut
 
 
 class ChatRequest(BaseModel):
@@ -22,3 +23,4 @@ class ChatResponse(BaseModel):
     model: str
     tools_used: list[str] = Field(default_factory=list)
     decision: Decision | None = None
+    pending_approvals: list[PendingApprovalOut] = Field(default_factory=list)

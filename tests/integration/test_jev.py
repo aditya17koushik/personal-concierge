@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.service import APPROVAL_REPLY, REFUSE_REPLY, AgentService
+from app.agent.service import NOT_SUPPORTED_REPLY, REFUSE_REPLY, AgentService
 from app.config import Settings
 from app.database.models import Expense
 from app.decisions.interpret import JevResponseError, Thresholds, interpret
@@ -35,6 +35,7 @@ class Empty(BaseModel):
 
 
 def dummy_tool(name: str, domain: str, **kw: Any) -> Tool:
+    kw.setdefault("summarize", lambda ctx, args: "dummy summary")
     return Tool(
         name=name,
         description=name,
@@ -209,12 +210,32 @@ def test_unknown_intents_are_dropped():
     assert only_unknown.action == "respond"
 
 
-@pytest.mark.parametrize("action", ["respond", "refuse", "needs_approval"])
+@pytest.mark.parametrize("action", ["respond", "refuse"])
 def test_non_tool_actions_expose_no_tools(action: str):
     decision = apply_policy(
         output(intents=["expense"], action=action), build_default_registry()
     )
     assert decision.allowed_tools == []
+
+
+def test_needs_approval_keeps_only_read_only_tools_and_lists_the_gated_one():
+    decision = apply_policy(
+        output(intents=["expense"], action="use_tools", risk="high"),
+        build_default_registry(),
+    )
+    assert decision.action == "needs_approval"
+    assert set(decision.allowed_tools) == {"list_expenses", "get_expense_summary"}
+    assert "add_expense" not in decision.allowed_tools  # side effect, even if low risk
+    assert decision.blocked_tools == ["delete_expense"]
+
+
+def test_needs_approval_without_a_gated_tool_exposes_nothing():
+    decision = apply_policy(
+        output(intents=["email"], action="use_tools", risk="high"),
+        build_default_registry(),
+    )
+    assert decision.action == "needs_approval"
+    assert decision.allowed_tools == [] and decision.blocked_tools == []
 
 
 def test_scores_are_carried_into_the_decision():
@@ -371,6 +392,9 @@ def test_default_thresholds_on_real_jev_scores(
     assert (decision.action, decision.intents) == (action, intents), message
     if action == "use_tools":
         assert decision.allowed_tools  # read tools offered, not withheld
+    elif decision.blocked_tools:  # approval-gated tool exists: read-only lookups only
+        assert decision.blocked_tools == ["delete_expense"]
+        assert set(decision.allowed_tools) == {"list_expenses", "get_expense_summary"}
     else:
         assert decision.allowed_tools == []
 
@@ -630,7 +654,7 @@ async def test_high_risk_with_no_matching_domain_still_needs_approval(db: Sessio
         provider, db, real_answers(cal=0.1, email=0.16, exp=0.02, p_high=1.0)
     ).chat("u1", "Send an email to ravi@example.com saying I'll be late")
 
-    assert result.reply == APPROVAL_REPLY
+    assert result.reply == NOT_SUPPORTED_REPLY
     assert result.decision is not None and result.decision.action == "needs_approval"
     assert provider.calls == []
 
@@ -643,7 +667,7 @@ async def test_high_risk_request_stops_before_the_main_llm(db: Session):
         provider, db, make_answers(needs=("email",), risk="high")
     ).chat("u1", "email Ravi that I'm late")
 
-    assert result.reply == APPROVAL_REPLY
+    assert result.reply == NOT_SUPPORTED_REPLY
     assert result.decision is not None and result.decision.action == "needs_approval"
     assert result.tools_used == []
     assert provider.calls == []

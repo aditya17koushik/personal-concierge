@@ -42,6 +42,19 @@ class ExpenseRepository:
         self._db.refresh(expense)
         return expense
 
+    def get(self, user_id: int, expense_id: int) -> Expense | None:
+        return self._db.scalar(
+            select(Expense).where(Expense.id == expense_id, Expense.user_id == user_id)
+        )
+
+    def delete(self, user_id: int, expense_id: int) -> bool:
+        expense = self.get(user_id, expense_id)
+        if expense is None:
+            return False
+        self._db.delete(expense)
+        self._db.commit()
+        return True
+
     def find(
         self,
         user_id: int,

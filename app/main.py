@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.agent import router as agent_router
+from app.api.approvals import router as approvals_router
 from app.api.auth import router as auth_router
 from app.config import get_settings
 from app.llm.base import LLMError
@@ -19,6 +20,7 @@ app = FastAPI(
 
 app.include_router(agent_router)
 app.include_router(auth_router)
+app.include_router(approvals_router)
 
 
 @app.exception_handler(LLMError)

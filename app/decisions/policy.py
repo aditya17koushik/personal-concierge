@@ -23,7 +23,13 @@ def apply_policy(output: JevOutput, registry: ToolRegistry) -> Decision:
         elif not allowed:
             action = "respond"  # nothing to run
 
-    if action != "use_tools":
+    if action == "needs_approval" and blocked:
+        # The model may PROPOSE the risky tool (nothing runs until approval) and
+        # look things up with read-only tools. No tool with side effects, ever.
+        allowed = [
+            t.name for t in candidates if not t.requires_approval and not t.side_effects
+        ]
+    elif action != "use_tools":
         allowed = []  # tools are exposed only for use_tools
     return Decision(
         intents=intents,

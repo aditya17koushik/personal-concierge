@@ -6,12 +6,14 @@ from typing import Callable
 
 from sqlalchemy.orm import Session
 
+from app.approvals.service import ApprovalService
 from app.database.repositories.users import UserRepository
 from app.decisions.jev import Decider
 from app.decisions.schemas import Decision
 from app.integrations.google.oauth import GoogleOAuthService
 from app.llm.base import LLMProvider
 from app.schemas.agent import ChatResponse
+from app.schemas.approvals import PendingApprovalOut
 from app.schemas.llm import Message
 from app.tools.base import ToolContext
 from app.tools.registry import ToolRegistry, build_default_registry
@@ -19,13 +21,14 @@ from app.tools.registry import ToolRegistry, build_default_registry
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 5
+MAX_PROPOSALS_PER_REQUEST = 5
 
 FALLBACK_REPLY = "Sorry, I couldn't complete that request. Please try again."
 REFUSE_REPLY = "Sorry, I can't help with that request."
-APPROVAL_REPLY = (
-    "That action changes things on your behalf, so it needs your explicit "
-    "approval. The approval flow isn't set up yet, so I haven't done anything. "
-    "I can still read your email and calendar, or track your expenses."
+NOT_SUPPORTED_REPLY = (
+    "I can't do that yet. Actions that change things for you need an approval "
+    "step, and I don't have a tool for this one. I can read your email and "
+    "calendar, and manage your expenses."
 )
 
 PROMPT_SECTIONS: dict[str, str] = {
@@ -60,6 +63,16 @@ NO_TOOLS_RULE = (
     "expenses, email or calendar right now."
 )
 
+PROPOSE_RULE = (
+    "The user asked for a change that needs their approval. You have read tools "
+    "to look things up, and proposal tools that only PREPARE a change. First use "
+    "the read tools to find the exact item (for example an expense id), then call "
+    "the proposal tool once per item. A proposal does nothing until the user "
+    "approves it. After proposing, say briefly what you prepared and that the "
+    "user must approve it. Never say it has been done. If the target is "
+    "ambiguous or cannot be found, ask the user instead of guessing."
+)
+
 
 def build_system_prompt(today: date, default_currency: str, decision: Decision) -> str:
     lines = [
@@ -69,13 +82,19 @@ def build_system_prompt(today: date, default_currency: str, decision: Decision) 
         f"The user's default currency is {default_currency}.",
     ]
 
+    domains = [i for i in decision.intents if i in PROMPT_SECTIONS]
+
     if decision.action == "use_tools":
-        domains = [i for i in decision.intents if i in PROMPT_SECTIONS]
         lines += [PROMPT_SECTIONS[d] for d in domains]
-        if "email" in domains or "calendar" in domains:
-            lines.append(SECURITY_RULE)
+    elif decision.action == "needs_approval":
+        lines.append(PROPOSE_RULE)
     else:
         lines.append(NO_TOOLS_RULE)
+
+    if decision.action in ("use_tools", "needs_approval") and (
+        "email" in domains or "calendar" in domains
+    ):
+        lines.append(SECURITY_RULE)
 
     return "\n".join(lines)
 
@@ -83,7 +102,12 @@ def build_system_prompt(today: date, default_currency: str, decision: Decision) 
 class AgentService:
     """Entry point for agent conversations.
 
-    Flow: Jev decides -> (respond | refuse | needs approval | tool loop).
+    Flow: Jev decides, then one of:
+      respond            -> plain answer, no tools
+      refuse             -> canned refusal
+      use_tools          -> tool loop with only the allowed tools
+      needs_approval     -> "propose mode": read tools + proposal-only tools;
+                            proposals are stored, never executed here
     Still stateless across requests; memory (a later step) plugs in here.
     """
 
@@ -93,6 +117,7 @@ class AgentService:
         db: Session,
         *,
         jev: Decider,  # required on purpose: no tool runs without a decision
+        approvals: ApprovalService | None = None,
         registry: ToolRegistry | None = None,
         default_currency: str = "INR",
         today_fn: Callable[[], date] = date.today,
@@ -105,13 +130,23 @@ class AgentService:
         self._today_fn = today_fn
         self._google_oauth = google_oauth
         self._jev = jev
+        self._approvals = approvals
 
-    def _canned(self, reply: str, decision: Decision) -> ChatResponse:
+    def _response(
+        self,
+        reply: str,
+        model: str,
+        decision: Decision,
+        tools_used: list[str] | None = None,
+        proposals: list[PendingApprovalOut] | None = None,
+    ) -> ChatResponse:
         return ChatResponse(
             reply=reply,
             provider=self._llm.name,
-            model=self._llm.model,
+            model=model,
+            tools_used=tools_used or [],
             decision=decision,
+            pending_approvals=proposals or [],
         )
 
     async def chat(self, user_id: str, message: str) -> ChatResponse:
@@ -142,13 +177,18 @@ class AgentService:
         )
 
         if decision.action == "refuse":
-            return self._canned(REFUSE_REPLY, decision)
-        if decision.action == "needs_approval":
-            return self._canned(APPROVAL_REPLY, decision)
+            return self._response(REFUSE_REPLY, self._llm.model, decision)
 
-        use_tools = decision.action == "use_tools"
+        propose_mode = decision.action == "needs_approval"
+        approvals = self._approvals
+        if propose_mode and (not decision.blocked_tools or approvals is None):
+            # High-risk, but no approval-gated tool exists for it: we can't do it.
+            return self._response(NOT_SUPPORTED_REPLY, self._llm.model, decision)
+
+        use_tools = decision.action == "use_tools" or propose_mode
         allowed = set(decision.allowed_tools) if use_tools else set()
-        tools = self._registry.schemas(allowed) if use_tools else None
+        proposable = set(decision.blocked_tools) if propose_mode else set()
+        tools = self._registry.schemas(allowed | proposable) if use_tools else None
 
         messages = [
             Message(
@@ -158,6 +198,7 @@ class AgentService:
             Message(role="user", content=message),
         ]
         tools_used: list[str] = []
+        proposals: list[PendingApprovalOut] = []
         last_model = self._llm.model
 
         for _ in range(MAX_TOOL_ROUNDS if use_tools else 1):
@@ -165,12 +206,8 @@ class AgentService:
             last_model = response.model
 
             if not response.tool_calls or not use_tools:
-                return ChatResponse(
-                    reply=response.content or "",
-                    provider=self._llm.name,
-                    model=last_model,
-                    tools_used=tools_used,
-                    decision=decision,
+                return self._response(
+                    response.content or "", last_model, decision, tools_used, proposals
                 )
 
             messages.append(
@@ -182,14 +219,23 @@ class AgentService:
             )
 
             for call in response.tool_calls:
-                if call.name not in allowed:
-                    # The model asked for a tool Jev did not allow for this message.
-                    logger.warning("blocked tool call outside allowed set: %s", call.name)
-                    result = {"error": "That tool is not available for this request."}
-                else:
+                if call.name in proposable and approvals is not None:
+                    if len(proposals) >= MAX_PROPOSALS_PER_REQUEST:
+                        result = {"error": "Too many proposals in one request."}
+                    else:
+                        result, pending = await approvals.propose(
+                            ctx, call.name, call.arguments, message
+                        )
+                        if pending is not None:
+                            proposals.append(pending)
+                elif call.name in allowed:
                     logger.info("tool call: %s", call.name)
                     result = await self._registry.execute(call.name, call.arguments, ctx)
                     tools_used.append(call.name)
+                else:
+                    # The model asked for a tool Jev did not allow for this message.
+                    logger.warning("blocked tool call outside allowed set: %s", call.name)
+                    result = {"error": "That tool is not available for this request."}
 
                 messages.append(
                     Message(
@@ -200,10 +246,4 @@ class AgentService:
                 )
 
         logger.warning("tool loop hit MAX_TOOL_ROUNDS for user_id=%s", user_id)
-        return ChatResponse(
-            reply=FALLBACK_REPLY,
-            provider=self._llm.name,
-            model=last_model,
-            tools_used=tools_used,
-            decision=decision,
-        )
+        return self._response(FALLBACK_REPLY, last_model, decision, tools_used, proposals)

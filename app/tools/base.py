@@ -26,6 +26,11 @@ class ToolContext:
 ToolResult = dict[str, Any]
 
 
+class ToolError(Exception):
+    """A known, user-safe problem (e.g. 'Expense not found.'). The message is
+    shown to the model, so never put secrets or internals in it."""
+
+
 @dataclass(frozen=True)
 class Tool:
     name: str
@@ -38,6 +43,10 @@ class Tool:
     domain: str  # "expense", "email", "calendar", ...
     risk: Risk = "low"
     side_effects: bool = False  # changes data or the outside world
+
+    # Required for tools that need approval: builds the human-readable summary
+    # the user approves, from the validated arguments. May raise ToolError.
+    summarize: Callable[[ToolContext, Any], str | Awaitable[str]] | None = None
 
     @property
     def requires_approval(self) -> bool:

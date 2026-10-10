@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.database.models import Expense
 from app.database.repositories.expenses import ExpenseRepository
-from app.tools.base import Tool, ToolContext
+from app.tools.base import Tool, ToolContext, ToolError
 
 
 def _serialize(expense: Expense) -> dict[str, Any]:
@@ -128,6 +128,39 @@ def get_expense_summary(ctx: ToolContext, args: ExpenseSummaryArgs) -> dict[str,
     }
 
 
+# ------------------------------------------------------------ delete_expense
+
+
+class DeleteExpenseArgs(BaseModel):
+    expense_id: int = Field(
+        gt=0,
+        description="Id of the expense to delete, taken from list_expenses results.",
+    )
+
+
+def summarize_delete_expense(ctx: ToolContext, args: DeleteExpenseArgs) -> str:
+    expense = ExpenseRepository(ctx.db).get(ctx.user_id, args.expense_id)
+    if expense is None:
+        raise ToolError("Expense not found.")
+    text = (
+        f"Delete expense #{expense.id}: {expense.amount} {expense.currency}, "
+        f"{expense.category}, {expense.spent_on.isoformat()}"
+    )
+    if expense.description:
+        text += f" ({expense.description})"
+    return text
+
+
+def delete_expense(ctx: ToolContext, args: DeleteExpenseArgs) -> dict[str, Any]:
+    repo = ExpenseRepository(ctx.db)
+    expense = repo.get(ctx.user_id, args.expense_id)
+    if expense is None:
+        return {"error": "Expense not found."}
+    snapshot = _serialize(expense)
+    repo.delete(ctx.user_id, args.expense_id)
+    return {"deleted": snapshot}
+
+
 EXPENSE_TOOLS: list[Tool] = [
     Tool(
         name="add_expense",
@@ -150,5 +183,18 @@ EXPENSE_TOOLS: list[Tool] = [
         args_model=ExpenseSummaryArgs,
         handler=get_expense_summary,
         domain="expense",
+    ),
+    Tool(
+        name="delete_expense",
+        description=(
+            "Delete one expense by id. This only PREPARES the deletion; it "
+            "happens only after the user approves it."
+        ),
+        args_model=DeleteExpenseArgs,
+        handler=delete_expense,
+        domain="expense",
+        risk="high",
+        side_effects=True,
+        summarize=summarize_delete_expense,
     ),
 ]
