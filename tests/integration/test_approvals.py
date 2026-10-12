@@ -614,3 +614,23 @@ async def test_without_an_approval_service_gated_requests_are_declined(
 
     assert result.reply == NOT_SUPPORTED_REPLY
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_delete_request_without_a_domain_match_can_still_be_proposed(
+    db: Session, clock: Clock
+):
+    # "Delete the smoke test": risky, but no domain word matched (synthetic scores)
+    uid = make_user(db, "u1")
+    eid = make_expense(db, uid, category="smoketest", description="smoke test")
+    provider = Recorder(
+        [calls(("delete_expense", {"expense_id": eid})), text("Prepared. Please approve.")]
+    )
+
+    result = await make_agent(
+        provider, db, real_answers(0.03, 0.10, 0.35, 0.5), clock
+    ).chat("u1", "Delete the smoke test")
+
+    assert result.decision is not None and result.decision.action == "needs_approval"
+    assert len(result.pending_approvals) == 1
+    assert expense_exists(db, eid)  # still needs a human to approve

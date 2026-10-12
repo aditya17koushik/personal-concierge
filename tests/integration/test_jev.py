@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.service import NOT_SUPPORTED_REPLY, REFUSE_REPLY, AgentService
+from app.approvals.service import ApprovalService
 from app.config import Settings
 from app.database.models import Expense
 from app.decisions.interpret import JevResponseError, Thresholds, interpret
@@ -238,6 +239,27 @@ def test_needs_approval_without_a_gated_tool_exposes_nothing():
     assert decision.allowed_tools == [] and decision.blocked_tools == []
 
 
+def test_high_risk_with_no_domain_offers_gated_tools_as_proposals():
+    # e.g. "Delete the smoke test": risky, but no domain word to match
+    decision = apply_policy(
+        output(intents=["general"], action="use_tools", risk="high"),
+        build_default_registry(),
+    )
+    assert decision.action == "needs_approval"
+    assert decision.intents == ["general"]
+    assert decision.blocked_tools == ["delete_expense"]
+    assert set(decision.allowed_tools) == {"list_expenses", "get_expense_summary"}
+
+
+def test_high_risk_in_a_domain_with_no_gated_tool_stays_declined():
+    # "send an email": the email domain matched, but nothing there can be gated
+    decision = apply_policy(
+        output(intents=["email"], action="use_tools", risk="high"),
+        build_default_registry(),
+    )
+    assert decision.blocked_tools == [] and decision.allowed_tools == []
+
+
 def test_scores_are_carried_into_the_decision():
     decision = apply_policy(
         output(intents=["expense"], action="use_tools", scores={"needs_expense": 0.97}),
@@ -374,9 +396,9 @@ REAL_SCORES = [
     ("Any unread emails from my bank?", (0.02, 0.9, 0.11, 0.06), "use_tools", ["email"]),
     ("What's on my calendar tomorrow?", (0.92, 0.11, 0.02, 0.0), "use_tools", ["calendar"]),
     ("Emails about my flight + calendar Friday", (0.96, 0.96, 0.03, 0.0), "use_tools", ["calendar", "email"]),
-    ("Send an email to ravi@example.com", (0.1, 0.16, 0.02, 1.0), "needs_approval", ["general"]),
-    ("Delete all my expenses", (0.02, 0.09, 0.95, 0.45), "needs_approval", ["expense"]),
-    ("Cancel my 3pm meeting", (0.92, 0.44, 0.02, 0.64), "needs_approval", ["calendar"]),
+    ("Send an email to ravi@example.com", (0.06, 0.88, 0.02, 1.0), "needs_approval", ["email"]),
+    ("Delete all my expenses", (0.02, 0.09, 0.98, 0.46), "needs_approval", ["expense"]),
+    ("Cancel my 3pm meeting", (0.96, 0.56, 0.03, 0.66), "needs_approval", ["calendar"]),
     ("Explain how compound interest works", (0.01, 0.02, 0.02, 0.0), "respond", ["general"]),
 ]
 
@@ -580,6 +602,7 @@ def make_agent(provider: Recorder, db: Session, answers: Any) -> AgentService:
         provider,
         db,
         jev=Jev(StubEvaluator(answers)),
+        approvals=ApprovalService(db, build_default_registry(), today_fn=lambda: TODAY),
         today_fn=lambda: TODAY,
     )
 
@@ -646,16 +669,32 @@ async def test_model_calling_a_tool_that_was_not_allowed_is_blocked(db: Session)
 
 
 @pytest.mark.asyncio
-async def test_high_risk_with_no_matching_domain_still_needs_approval(db: Session):
-    # Real Jev scored "send an email to Ravi" needs_email=0.16 but risk=1.0
-    provider = Recorder([text("should never be called")])
+async def test_high_risk_with_no_domain_goes_to_propose_mode_not_a_dead_end(db: Session):
+    # synthetic scores: risky, but no domain matched
+    provider = Recorder([text("I can't do that, but I can help with expenses.")])
 
     result = await make_agent(
         provider, db, real_answers(cal=0.1, email=0.16, exp=0.02, p_high=1.0)
+    ).chat("u1", "Wire money to my friend")
+
+    assert result.decision is not None and result.decision.action == "needs_approval"
+    assert result.pending_approvals == []
+    assert len(provider.calls) == 1  # the model decided, not a canned refusal
+    assert provider.calls[0].tool_names == {
+        "list_expenses", "get_expense_summary", "delete_expense",
+    }
+
+
+@pytest.mark.asyncio
+async def test_high_risk_in_a_domain_without_gated_tools_is_declined(db: Session):
+    # real scores for "Send an email to ravi@example.com"
+    provider = Recorder([text("should never be called")])
+
+    result = await make_agent(
+        provider, db, real_answers(cal=0.06, email=0.88, exp=0.02, p_high=1.0)
     ).chat("u1", "Send an email to ravi@example.com saying I'll be late")
 
     assert result.reply == NOT_SUPPORTED_REPLY
-    assert result.decision is not None and result.decision.action == "needs_approval"
     assert provider.calls == []
 
 
@@ -710,6 +749,7 @@ async def test_system_prompt_contains_only_relevant_sections(db: Session):
     prompt = provider.calls[0].messages[0].content or ""
     assert "expense tools" in prompt
     assert "only need an amount" in prompt
+    assert "plain text only" in prompt.lower()
     assert "Do not ask about the currency" in prompt
     assert "Gmail" not in prompt and "Calendar" not in prompt
     assert "untrusted" not in prompt  # no email/calendar content in play

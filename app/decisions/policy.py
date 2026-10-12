@@ -23,6 +23,15 @@ def apply_policy(output: JevOutput, registry: ToolRegistry) -> Decision:
         elif not allowed:
             action = "respond"  # nothing to run
 
+    if action == "needs_approval" and not blocked and not domains:
+        # High risk but no domain matched (e.g. "Delete the smoke test"). Rather
+        # than a dead end, offer every approval-gated tool as a PROPOSAL, with
+        # read-only lookups from their domains. A human still approves anything.
+        gated = [t for t in registry.tools if t.requires_approval]
+        gated_domains = {t.domain for t in gated}
+        candidates = [t for t in registry.tools if t.domain in gated_domains]
+        blocked = [t.name for t in gated]
+
     if action == "needs_approval" and blocked:
         # The model may PROPOSE the risky tool (nothing runs until approval) and
         # look things up with read-only tools. No tool with side effects, ever.

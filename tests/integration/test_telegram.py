@@ -30,6 +30,7 @@ from app.telegram.handler import (
     MAX_TELEGRAM_CHARS,
     UNAUTHORIZED,
     TelegramHandler,
+    plain_text,
     split_message,
 )
 from app.telegram.users import TelegramUsers, hash_code
@@ -274,6 +275,32 @@ def test_split_message_prefers_line_breaks_and_handles_empty():
     assert split_message("   ") == []
     assert split_message("a\nb") == ["a\nb"]
     assert split_message("x" * 250, 100) == ["x" * 100, "x" * 100, "x" * 50]
+
+
+def test_plain_text_strips_markdown_but_keeps_content():
+    raw = (
+        "Here are your emails:\n\n"
+        "1. **From:** LinkedIn <jobs@linkedin.com>\n"
+        "   **Subject:** Application sent\n"
+        "## Heading\n"
+        "Use `ls` here, a * b and snake_case_name stay"
+    )
+    assert plain_text(raw) == (
+        "Here are your emails:\n\n"
+        "1. From: LinkedIn <jobs@linkedin.com>\n"
+        "   Subject: Application sent\n"
+        "Heading\n"
+        "Use ls here, a * b and snake_case_name stay"
+    )
+
+
+@pytest.mark.asyncio
+async def test_replies_are_sent_without_markdown(session_factory):
+    rig = make_rig(session_factory, responses=[text_resp("**Subject:** Hello **there**")])
+
+    await rig.send("hi")
+
+    assert rig.tg.texts == ["Subject: Hello there"]
 
 
 # ------------------------------------------------------------- API client

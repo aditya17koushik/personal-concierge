@@ -80,6 +80,8 @@ def build_system_prompt(today: date, default_currency: str, decision: Decision) 
         f"Today's date is {today.isoformat()}. "
         "Resolve relative dates like 'yesterday' or 'last week' from it.",
         f"The user's default currency is {default_currency}.",
+        "Write plain text only: no Markdown, no asterisks, no # headings, no "
+        "backticks. Use short lines and '- ' for lists.",
     ]
 
     domains = [i for i in decision.intents if i in PROMPT_SECTIONS]

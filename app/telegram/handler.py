@@ -46,6 +46,19 @@ ADMIN_HELP = (
 )
 
 
+_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_HEADING = re.compile(r"^#{1,6}[ \t]+", re.MULTILINE)
+_INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+
+
+def plain_text(text: str) -> str:
+    """Strip the Markdown models like to emit. Messages are sent as plain text
+    (so stray characters can't break them), where '**bold**' would show as-is."""
+    text = _BOLD.sub(r"\1", text)
+    text = _HEADING.sub("", text)
+    return _INLINE_CODE.sub(r"\1", text)
+
+
 def split_message(text: str, limit: int = MAX_TELEGRAM_CHARS) -> list[str]:
     """Split long text on line breaks (then spaces) so each part fits Telegram."""
     text = text.strip()
@@ -138,7 +151,7 @@ class TelegramHandler:
     async def _send(
         self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None
     ) -> None:
-        for index, chunk in enumerate(split_message(text) or ["(no response)"]):
+        for index, chunk in enumerate(split_message(plain_text(text)) or ["(no response)"]):
             await self._client.send_message(
                 chat_id, chunk, reply_markup if index == 0 and reply_markup else None
             )
