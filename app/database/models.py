@@ -2,7 +2,17 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.session import Base
@@ -118,3 +128,43 @@ class PendingAction(Base):
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class TelegramLink(Base):
+    """Maps a verified Telegram account to an internal user."""
+
+    __tablename__ = "telegram_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class TelegramInvite(Base):
+    """Single-use, expiring invite. Only a hash of the code is stored."""
+
+    __tablename__ = "telegram_invites"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_by_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    used_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

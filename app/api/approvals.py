@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.agent.factory import build_approval_service
 from app.approvals.service import ApprovalError, ApprovalService
 from app.config import get_settings
 from app.database.session import get_db
-from app.integrations.google.oauth import GoogleOAuthService
 from app.schemas.approvals import ApprovalOut
-from app.tools.registry import build_default_registry
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -14,14 +13,7 @@ UserIdQuery = Query(min_length=1, max_length=255)
 
 
 def get_approval_service(db: Session = Depends(get_db)) -> ApprovalService:
-    settings = get_settings()
-    return ApprovalService(
-        db,
-        build_default_registry(),
-        ttl_minutes=settings.approval_ttl_minutes,
-        google_oauth=GoogleOAuthService(db, settings),
-        default_currency=settings.default_currency,
-    )
+    return build_approval_service(db, get_settings())
 
 
 @router.get("", response_model=list[ApprovalOut])

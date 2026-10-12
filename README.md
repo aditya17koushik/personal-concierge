@@ -103,6 +103,29 @@ uvicorn app.main:app --reload
 - Health check: http://localhost:8000/health
 - Interactive docs: http://localhost:8000/docs
 
+## Telegram
+
+The bot uses long polling, so it needs no public URL and works on your own machine. It runs as its
+own process and calls the same agent code as the API (Jev, tools and approvals included).
+
+1. Create a bot with **@BotFather** (`/newbot`) and put the token in `.env` as `TELEGRAM_BOT_TOKEN`.
+2. Get your numeric id from **@userinfobot** and set `TELEGRAM_ADMIN_ID`.
+3. Run `alembic revision --autogenerate -m "add telegram"` then `alembic upgrade head`.
+4. Check the token: `python -m app.telegram --check`
+5. Start it (alongside uvicorn): `python -m app.telegram`
+
+Access is invite-only. The admin is linked to the existing internal user (`TELEGRAM_ADMIN_EXTERNAL_ID`,
+default `me`), so your expenses and Google connection carry over. Others join with `/invite`:
+
+| Command | Who | What |
+| --- | --- | --- |
+| `/start <code>` | anyone | Redeem a single-use invite |
+| `/help`, `/approvals`, `/google` | linked users | Help, pending approvals, Google login link |
+| `/invite`, `/users`, `/remove <id>` | admin | Manage who can use the bot |
+
+Approve and Reject are buttons only. They are never tools the model can call, so text inside an
+email or invite can't approve anything. Private chats only; groups are ignored.
+
 ## Approvals
 
 Risky actions are never executed straight from a chat message. When Jev rates a request high risk
@@ -200,6 +223,13 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `TELEGRAM_BOT_TOKEN` | empty | Telegram bot (Step 12) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | empty | Google OAuth (Step 7) |
 | `APP_SECRET_KEY` | empty | Application secret |
+| `TELEGRAM_BOT_TOKEN` | empty | Bot token from @BotFather |
+| `TELEGRAM_ADMIN_ID` | `0` | Your numeric Telegram id (from @userinfobot). `0` disables the bot |
+| `TELEGRAM_ADMIN_EXTERNAL_ID` | `me` | Internal user the admin maps to, so existing data carries over |
+| `TELEGRAM_MAX_USERS` | `10` | Cap on linked Telegram users |
+| `TELEGRAM_INVITE_TTL_HOURS` | `24` | Invite code lifetime |
+| `TELEGRAM_AGENT_TIMEOUT_SECONDS` | `90` | Give up on one request after this long |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Used to build the `/google` login link |
 | `APPROVAL_TTL_MINUTES` | `30` | How long a proposed action can be approved before it expires |
 | `TYPESAFE_API_KEY` | empty | TypeSafe AI key for Jev. If empty, the app runs in read-only fallback mode |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | TypeSafe API root |
@@ -211,21 +241,19 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 
 ## Roadmap
 
-| Step | Feature | Status |
+| Phase | Feature | Status |
 | --- | --- | --- |
-| 1 | Repository foundation (FastAPI, PostgreSQL, SQLAlchemy, Alembic, Pydantic, config, logging) | Done |
-| 2 | LLM abstraction (OpenAI, Ollama) | Done |
-| 3 | `POST /agent/chat` | Done |
-| 4 | Langfuse | Deferred (after Jev and Hermes) |
-| 5 | Expense tools + database | Done |
-| 6 | Google OAuth | Done |
-| 7 | Gmail read/search (read-only) | Done |
-| 8 | Google Calendar (read-only) | Done |
-| 9 | Jev decision layer | Done |
-| 10 | Approval system | Done |
-| 11 | Hermes integration | Next |
-| 12 | Telegram | Planned |
-| 13 | WhatsApp | Planned |
-| 14 | Memory | Planned |
-| 15 | Advanced personal planning | Planned |
+| 1-3 | Foundation, LLM layer (OpenAI, Ollama), `/agent/chat` | Done |
+| 4 | Expenses | Done |
+| 5-7 | Google login, Gmail (read), Calendar (read) | Done |
+| 8 | Jev decision layer (TypeSafe) | Done |
+| 9 | Approval system | Done |
+| 10 | Safety hardening (DB timeouts, non-blocking event loop) | Done |
+| 11 | Telegram bot | Done |
+| 12 | Multi-user hardening (API auth, signed Google link, profiles, rate limits) | Next |
+| 13 | Conversation history | Planned |
+| 14 | Fitness: meals, workouts, weight, goals, progress | Planned |
+| 15 | Food photo analysis | Planned |
+| 16 | Coach and reminders | Planned |
+| 17 | Long-term memory | Planned |
 

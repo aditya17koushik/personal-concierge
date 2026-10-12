@@ -49,6 +49,13 @@ class Settings(BaseSettings):
 
     # Telegram
     telegram_bot_token: str = ""
+    telegram_admin_id: int = 0  # your numeric Telegram id; 0 disables the bot
+    telegram_admin_external_id: str = "me"  # internal user the admin maps to
+    telegram_poll_timeout: int = 30
+    telegram_agent_timeout_seconds: int = 90
+    telegram_invite_ttl_hours: int = 24
+    telegram_max_users: int = 10  # cost guard until per-user limits exist
+    public_base_url: str = "http://127.0.0.1:8000"
 
     # Google
     google_client_id: str = ""

@@ -22,19 +22,26 @@ from app.tools.registry import ToolRegistry
 
 
 @pytest.fixture
-def db() -> Iterator[Session]:
+def session_factory() -> Iterator[sessionmaker[Session]]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine, autoflush=False)()
+    try:
+        yield sessionmaker(bind=engine, autoflush=False)
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def db(session_factory: sessionmaker[Session]) -> Iterator[Session]:
+    session = session_factory()
     try:
         yield session
     finally:
         session.close()
-        engine.dispose()
 
 
 class PassthroughJev:
