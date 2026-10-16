@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
 
 from sqlalchemy.orm import Session
@@ -9,10 +10,13 @@ from sqlalchemy.orm import Session
 from app.agent.service import AgentService
 from app.approvals.service import ApprovalError, ApprovalService
 from app.config import Settings
+from app.integrations.google.links import LoginLinkService
 from app.integrations.telegram.client import TelegramAPI, TelegramError
 from app.llm.base import LLMError
+from app.profiles.service import ProfileError, ProfileService, local_today
 from app.schemas.approvals import PendingApprovalOut
 from app.telegram.users import InviteError, LinkedUser, TelegramUsers
+from app.usage.service import QuotaService, RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +40,31 @@ HELP_TEXT = (
     "Commands:\n"
     "/approvals - changes waiting for your approval\n"
     "/google - connect your Google account\n"
+    "/profile - your timezone, currency and units\n"
+    "/timezone <name> - e.g. /timezone Asia/Kolkata\n"
+    "/currency <code> - e.g. /currency INR\n"
+    "/units <metric|imperial>\n"
     "/help - this message"
 )
+WELCOME_TIP = (
+    "\n\nFirst, set your timezone so dates and reminders are right, "
+    "for example: /timezone Asia/Kolkata"
+)
+PROFILE_COMMANDS = {
+    "/timezone": ("timezone", "Timezone", "/timezone Asia/Kolkata"),
+    "/currency": ("currency", "Currency", "/currency INR"),
+    "/units": ("unit_system", "Units", "/units metric"),
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_wait(seconds: int) -> str:
+    hours, rest = divmod(max(seconds, 0), 3600)
+    minutes = rest // 60
+    return f"{hours}h {minutes}m" if hours else f"{max(minutes, 1)}m"
 ADMIN_HELP = (
     "\n\nAdmin:\n"
     "/invite - create a single-use invite code\n"
@@ -114,6 +141,7 @@ class TelegramHandler:
         approvals_factory: Callable[[Session], ApprovalService],
         bot_username: str | None = None,
         clock: Callable[[], float] = time.monotonic,
+        now_fn: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._client = client
         self._session_factory = session_factory
@@ -122,6 +150,7 @@ class TelegramHandler:
         self._approvals_factory = approvals_factory
         self._bot_username = bot_username
         self._clock = clock
+        self._now_fn = now_fn
         self._failed_redeems: dict[int, list[float]] = {}
 
     # ----------------------------------------------------------------- entry
@@ -229,7 +258,7 @@ class TelegramHandler:
             await self._send(chat_id, exc.message)
             return
 
-        await self._send(chat_id, "Welcome! You're all set.\n\n" + HELP_TEXT)
+        await self._send(chat_id, "Welcome! You're all set.\n\n" + HELP_TEXT + WELCOME_TIP)
 
     # ---------------------------------------------------------------- commands
 
@@ -241,15 +270,11 @@ class TelegramHandler:
         elif command == "/approvals":
             await self._list_approvals(link, chat_id)
         elif command == "/google":
-            url = (
-                f"{self._settings.public_base_url.rstrip('/')}"
-                f"/auth/google/login?user_id={link.external_id}"
-            )
-            await self._send(
-                chat_id,
-                "Open this link in a browser to connect your Google account "
-                f"(Gmail and Calendar, read-only):\n{url}",
-            )
+            await self._google_link(link, chat_id)
+        elif command == "/profile":
+            await self._profile(link, chat_id)
+        elif command in PROFILE_COMMANDS:
+            await self._set_profile(link, chat_id, command, arg)
         elif command == "/invite" and link.is_admin:
             await self._invite(link, chat_id)
         elif command == "/users" and link.is_admin:
@@ -260,6 +285,60 @@ class TelegramHandler:
             await self._remove(link, chat_id, arg)
         else:
             await self._send(chat_id, "Unknown command. Send /help to see what I can do.")
+
+    async def _google_link(self, link: LinkedUser, chat_id: int) -> None:
+        # Created for the VERIFIED Telegram user only; single-use and short-lived.
+        code, _expires = await self._db(
+            lambda db: LoginLinkService(db, self._settings).create(link.user_id)
+        )
+        base = self._settings.public_base_url.rstrip("/")
+        minutes = self._settings.google_login_link_ttl_minutes
+        await self._send(
+            chat_id,
+            "Open this link in your browser to connect your Google account "
+            "(Gmail and Calendar, read-only). It works once and expires in "
+            f"{minutes} minutes. Only open links you requested yourself:\n"
+            f"{base}/auth/google/login?code={code}",
+        )
+
+    async def _profile(self, link: LinkedUser, chat_id: int) -> None:
+        def load(db: Session) -> tuple[Any, int]:
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            day = local_today(profile.timezone, self._now_fn())
+            used = QuotaService(db, self._settings.daily_message_limit).used(link.user_id, day)
+            return profile, used
+
+        profile, used = await self._db(load)
+        lines = [
+            "Your profile",
+            f"Timezone: {profile.timezone}",
+            f"Currency: {profile.currency}",
+            f"Units: {profile.unit_system}",
+        ]
+        if self._settings.daily_message_limit > 0:
+            lines.append(f"Messages today: {used} of {self._settings.daily_message_limit}")
+        lines.append("\nChange with /timezone, /currency or /units.")
+        await self._send(chat_id, "\n".join(lines))
+
+    async def _set_profile(
+        self, link: LinkedUser, chat_id: int, command: str, arg: str
+    ) -> None:
+        field, label, example = PROFILE_COMMANDS[command]
+        if not arg:
+            await self._send(chat_id, f"Usage: {example}")
+            return
+        try:
+            profile = await self._db(
+                lambda db: ProfileService(
+                    db, self._settings.default_currency, self._settings.default_timezone
+                ).update(link.user_id, **{field: arg})
+            )
+        except ProfileError as exc:
+            await self._send(chat_id, exc.message)
+            return
+        await self._send(chat_id, f"{label} set to {getattr(profile, field)}.")
 
     async def _invite(self, admin: LinkedUser, chat_id: int) -> None:
         code, _expires = await self._db(
@@ -303,6 +382,14 @@ class TelegramHandler:
                 agent.chat(link.external_id, text),
                 timeout=self._settings.telegram_agent_timeout_seconds,
             )
+        except RateLimitExceeded as exc:
+            await self._send(
+                chat_id,
+                f"You've reached today's limit of {exc.limit} messages. "
+                f"It resets at midnight in your timezone, in about "
+                f"{format_wait(exc.retry_after_seconds)}.",
+            )
+            return
         except asyncio.TimeoutError:
             await self._send(chat_id, "That took too long. Please try again.")
             return

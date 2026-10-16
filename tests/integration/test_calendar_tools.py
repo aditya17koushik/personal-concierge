@@ -282,7 +282,7 @@ class ScriptedProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
-async def test_agent_lists_events_and_prompt_mentions_calendar(db: Session):
+async def test_agent_lists_events_and_prompt_mentions_calendar(db: Session, passthrough_jev):
     connect_user(db)
     service = make_service(db, calendar_handler([], events=[TIMED]))
     provider = ScriptedProvider(
@@ -294,7 +294,9 @@ async def test_agent_lists_events_and_prompt_mentions_calendar(db: Session):
             LLMResponse(content="You have a standup tomorrow.", model="scripted-model"),
         ]
     )
-    agent = AgentService(provider, db, today_fn=lambda: TODAY, google_oauth=service)
+    agent = AgentService(
+        provider, db, today_fn=lambda: TODAY, google_oauth=service, jev=passthrough_jev
+    )
 
     result = await agent.chat("me", "what's on my calendar?")
 

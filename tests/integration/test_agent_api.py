@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.agent.service import AgentService
 from app.api.agent import get_agent_service
+from app.api.deps import CurrentUser, get_current_user
+from app.database.repositories.users import UserRepository
 from app.llm.base import LLMError, LLMProvider
 from app.main import app
 from app.schemas.llm import LLMResponse, Message
@@ -32,10 +34,9 @@ class FakeProvider(LLMProvider):
         return LLMResponse(content="Hello from fake", model="fake-model")
 
 
-def make_client(provider: FakeProvider, db: Session, jev: Any) -> TestClient:
-    app.dependency_overrides[get_agent_service] = lambda: AgentService(
-        provider, db, jev=jev
-    )
+def make_client(provider: FakeProvider, db: Session, jev: Any, user: str = "u1") -> TestClient:
+    app.dependency_overrides[get_agent_service] = lambda: AgentService(provider, db, jev=jev)
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(0, user)
     return TestClient(app)
 
 
@@ -49,7 +50,7 @@ def test_chat_success(db: Session, passthrough_jev):
     provider = FakeProvider()
     client = make_client(provider, db, passthrough_jev)
 
-    res = client.post("/agent/chat", json={"user_id": "u1", "message": "  hi  "})
+    res = client.post("/agent/chat", json={"message": "  hi  "})
 
     assert res.status_code == 200
     body = res.json()
@@ -58,20 +59,23 @@ def test_chat_success(db: Session, passthrough_jev):
     assert body["model"] == "fake-model"
     assert body["tools_used"] == []
     assert body["decision"]["action"] == "use_tools"
+    assert body["pending_approvals"] == []
     assert provider.received[0].role == "system"
     assert provider.received[1].content == "hi"
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"user_id": "u1", "message": ""},
-        {"user_id": "u1", "message": "   "},
-        {"user_id": "", "message": "hi"},
-        {"message": "hi"},
-    ],
-)
-def test_chat_validation(payload: dict[str, str], db: Session, passthrough_jev):
+def test_a_user_id_in_the_body_is_ignored(db: Session, passthrough_jev):
+    client = make_client(FakeProvider(), db, passthrough_jev, user="alice")
+
+    res = client.post("/agent/chat", json={"message": "hi", "user_id": "victim"})
+
+    assert res.status_code == 200
+    assert UserRepository(db).get("alice") is not None  # acted as the token's user
+    assert UserRepository(db).get("victim") is None
+
+
+@pytest.mark.parametrize("payload", [{"message": ""}, {"message": "   "}, {}, {"message": 5}])
+def test_chat_validation(payload: dict[str, Any], db: Session, passthrough_jev):
     client = make_client(FakeProvider(), db, passthrough_jev)
     assert client.post("/agent/chat", json=payload).status_code == 422
 
@@ -79,7 +83,7 @@ def test_chat_validation(payload: dict[str, str], db: Session, passthrough_jev):
 def test_chat_llm_failure_returns_502(db: Session, passthrough_jev):
     client = make_client(FakeProvider(error=LLMError("boom")), db, passthrough_jev)
 
-    res = client.post("/agent/chat", json={"user_id": "u1", "message": "hi"})
+    res = client.post("/agent/chat", json={"message": "hi"})
 
     assert res.status_code == 502
     assert "boom" not in res.text

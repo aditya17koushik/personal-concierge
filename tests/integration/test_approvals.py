@@ -15,6 +15,7 @@ from app.agent.service import (
     AgentService,
 )
 from app.api.approvals import get_approval_service
+from app.api.deps import CurrentUser, get_current_user
 from app.approvals.service import ApprovalError, ApprovalService
 from app.database.models import Expense, PendingAction
 from app.database.repositories.approvals import ApprovalRepository
@@ -345,6 +346,7 @@ def test_registry_refuses_gated_tools_without_a_summary():
 @pytest.fixture
 def client(db: Session, service: ApprovalService) -> Iterator[TestClient]:
     app.dependency_overrides[get_approval_service] = lambda: service
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(0, "me")
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -357,15 +359,15 @@ async def test_api_list_approve_and_replay(
     eid = make_expense(db, uid)
     approval_id = await propose_delete(service, db, uid, eid)
 
-    listed = client.get("/approvals", params={"user_id": "me"}).json()
+    listed = client.get("/approvals").json()
     assert [a["id"] for a in listed] == [approval_id]
     assert listed[0]["summary"].startswith("Delete expense #")
 
-    done = client.post(f"/approvals/{approval_id}/approve", params={"user_id": "me"})
+    done = client.post(f"/approvals/{approval_id}/approve")
     assert done.status_code == 200 and done.json()["status"] == "executed"
     assert not expense_exists(db, eid)
 
-    again = client.post(f"/approvals/{approval_id}/approve", params={"user_id": "me"})
+    again = client.post(f"/approvals/{approval_id}/approve")
     assert again.status_code == 409
 
 
@@ -377,18 +379,17 @@ async def test_api_reject_and_errors(
     rejected_id = await propose_delete(service, db, uid, make_expense(db, uid))
     expired_id = await propose_delete(service, db, uid, make_expense(db, uid, "5.00"))
 
-    res = client.post(f"/approvals/{rejected_id}/reject", params={"user_id": "me"})
+    res = client.post(f"/approvals/{rejected_id}/reject")
     assert res.status_code == 200 and res.json()["status"] == "rejected"
 
     clock.now = START + timedelta(hours=1)
     assert client.post(
-        f"/approvals/{expired_id}/approve", params={"user_id": "me"}
+        f"/approvals/{expired_id}/approve"
     ).status_code == 410
 
     assert client.post(
-        "/approvals/nope/approve", params={"user_id": "me"}
+        "/approvals/nope/approve"
     ).status_code == 404
-    assert client.post("/approvals/nope/approve").status_code == 422  # user_id required
 
 
 # ------------------------------------------------------- agent: propose mode

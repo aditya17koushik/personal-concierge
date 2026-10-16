@@ -274,7 +274,7 @@ class ScriptedProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
-async def test_agent_searches_gmail_and_treats_email_as_untrusted(db: Session):
+async def test_agent_searches_gmail_and_treats_email_as_untrusted(db: Session, passthrough_jev):
     connect_user(db)
     seen: list[httpx.Request] = []
     handler = gmail_handler({"m1": sample_message()}, seen)
@@ -292,7 +292,9 @@ async def test_agent_searches_gmail_and_treats_email_as_untrusted(db: Session):
             LLMResponse(content="You have 1 invoice email.", model="scripted-model"),
         ]
     )
-    agent = AgentService(provider, db, today_fn=lambda: TODAY, google_oauth=service)
+    agent = AgentService(
+        provider, db, today_fn=lambda: TODAY, google_oauth=service, jev=passthrough_jev
+    )
 
     result = await agent.chat("me", "any invoice emails?")
 

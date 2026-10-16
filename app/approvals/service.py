@@ -10,6 +10,7 @@ from app.database.models import PendingAction
 from app.database.repositories.approvals import ApprovalRepository
 from app.database.repositories.users import UserRepository
 from app.integrations.google.oauth import GoogleOAuthService
+from app.profiles.service import ProfileService, local_today
 from app.schemas.approvals import ApprovalOut, PendingApprovalOut
 from app.tools.base import ToolContext
 from app.tools.registry import ToolRegistry
@@ -57,6 +58,8 @@ class _Snapshot:
     user_id: int
     tool_name: str
     arguments: dict[str, Any]
+    currency: str
+    timezone: str
 
 
 class ApprovalService:
@@ -72,7 +75,8 @@ class ApprovalService:
         ttl_minutes: int = 30,
         google_oauth: GoogleOAuthService | None = None,
         default_currency: str = "INR",
-        today_fn: Callable[[], date] = date.today,
+        default_timezone: str = "UTC",
+        today_fn: Callable[[], date] | None = None,
         now_fn: Callable[[], datetime] = _now,
     ) -> None:
         self._db = db
@@ -82,6 +86,7 @@ class ApprovalService:
         self._ttl = timedelta(minutes=ttl_minutes)
         self._google_oauth = google_oauth
         self._default_currency = default_currency
+        self._default_timezone = default_timezone
         self._today_fn = today_fn
         self._now = now_fn
 
@@ -171,8 +176,8 @@ class ApprovalService:
         ctx = ToolContext(
             db=self._db,
             user_id=snap.user_id,
-            today=self._today_fn(),
-            default_currency=self._default_currency,
+            today=self._today_fn() if self._today_fn else local_today(snap.timezone, self._now()),
+            default_currency=snap.currency,
             external_user_id=external_user_id,
             google_oauth=self._google_oauth,
         )
@@ -186,7 +191,17 @@ class ApprovalService:
 
     def _load_and_claim(self, external_user_id: str, approval_id: str) -> _Snapshot:
         action = self._load(external_user_id, approval_id)
-        snap = _Snapshot(action.id, action.user_id, action.tool_name, dict(action.arguments))
+        profile = ProfileService(
+            self._db, self._default_currency, self._default_timezone
+        ).get_or_create(action.user_id)
+        snap = _Snapshot(
+            action.id,
+            action.user_id,
+            action.tool_name,
+            dict(action.arguments),
+            profile.currency,
+            profile.timezone,
+        )
         if not self._repo.claim(action.id):
             raise ApprovalError(409, "This action was already handled.")
         return snap

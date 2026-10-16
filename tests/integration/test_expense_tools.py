@@ -128,14 +128,14 @@ def tool_response(name: str, args: dict[str, Any]) -> LLMResponse:
 
 
 @pytest.mark.asyncio
-async def test_agent_runs_tool_then_answers(db: Session):
+async def test_agent_runs_tool_then_answers(db: Session, passthrough_jev):
     provider = ScriptedProvider(
         [
             tool_response("add_expense", {"amount": 12, "category": "food"}),
             LLMResponse(content="Saved 12 for food.", model="scripted-model"),
         ]
     )
-    service = AgentService(provider, db, today_fn=lambda: TODAY)
+    service = AgentService(provider, db, today_fn=lambda: TODAY, jev=passthrough_jev)
 
     result = await service.chat("u1", "I spent 12 on lunch")
 
@@ -152,9 +152,9 @@ async def test_agent_runs_tool_then_answers(db: Session):
 
 
 @pytest.mark.asyncio
-async def test_agent_stops_runaway_tool_loop(db: Session):
+async def test_agent_stops_runaway_tool_loop(db: Session, passthrough_jev):
     provider = ScriptedProvider([tool_response("list_expenses", {})])
-    service = AgentService(provider, db, today_fn=lambda: TODAY)
+    service = AgentService(provider, db, today_fn=lambda: TODAY, jev=passthrough_jev)
 
     result = await service.chat("u1", "loop forever")
 

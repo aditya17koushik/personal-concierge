@@ -2,7 +2,7 @@
   "info": {
     "name": "Personal Agent",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Run the folders top to bottom. Set user_id to the same value you connected Google with."
+    "description": "Authenticated with a personal API token: create one with `python -m app.admin token-create --user me --label postman`, then paste it into the collection variable `token`. The server works out who you are from the token, so no request carries a user_id."
   },
   "variable": [
     {
@@ -10,8 +10,8 @@
       "value": "http://127.0.0.1:8000"
     },
     {
-      "key": "user_id",
-      "value": "me"
+      "key": "token",
+      "value": ""
     }
   ],
   "item": [
@@ -46,6 +46,36 @@
               }
             }
           ]
+        },
+        {
+          "name": "Auth: request without a token (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/approvals",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "approvals"
+              ]
+            }
+          }
         }
       ]
     },
@@ -78,7 +108,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Say hello in one short sentence\"\n}",
+              "raw": "{\n  \"message\": \"Say hello in one short sentence\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -121,7 +151,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"   \"\n}",
+              "raw": "{\n  \"message\": \"   \"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -171,7 +201,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"I spent 250 on lunch today\"\n}",
+              "raw": "{\n  \"message\": \"I spent 250 on lunch today\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -217,7 +247,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Add 1200 for groceries on 2026-10-01\"\n}",
+              "raw": "{\n  \"message\": \"Add 1200 for groceries on 2026-10-01\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -263,7 +293,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Show my last 5 expenses\"\n}",
+              "raw": "{\n  \"message\": \"Show my last 5 expenses\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -309,7 +339,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"How much did I spend this month by category?\"\n}",
+              "raw": "{\n  \"message\": \"How much did I spend this month by category?\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -355,7 +385,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"I bought something\"\n}",
+              "raw": "{\n  \"message\": \"I bought something\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -381,42 +411,36 @@
       "name": "4. Google connection",
       "item": [
         {
-          "name": "Login (open the URL in a BROWSER)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/auth/google/login?user_id={{user_id}}",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "google",
-                "login"
-              ],
-              "query": [
-                {
-                  "key": "user_id",
-                  "value": "{{user_id}}"
-                }
-              ]
-            },
-            "description": "Postman shows the redirect target in the Location header. To actually sign in, copy this URL into a browser."
-          },
+          "name": "Create single-use Google login link",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"redirects to Google\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(\"accounts.google.com\"));"
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const url = pm.response.json().url;",
+                  "pm.test(\"returns a login url\", () => pm.expect(url).to.include(\"/auth/google/login?code=\"));",
+                  "console.log(\"Open this in a BROWSER (works once, expires in 10 min):\", url);"
                 ]
               }
             }
           ],
-          "protocolProfileBehavior": {
-            "followRedirects": false
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/google/link",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "google",
+                "link"
+              ]
+            },
+            "description": "Returns a single-use URL. Open it in a browser to connect your Google account. Only open links you requested yourself."
           }
         },
         {
@@ -425,7 +449,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/auth/google/status?user_id={{user_id}}",
+              "raw": "{{base_url}}/auth/google/status",
               "host": [
                 "{{base_url}}"
               ],
@@ -433,12 +457,6 @@
                 "auth",
                 "google",
                 "status"
-              ],
-              "query": [
-                {
-                  "key": "user_id",
-                  "value": "{{user_id}}"
-                }
               ]
             },
             "description": ""
@@ -462,19 +480,13 @@
             "method": "DELETE",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/auth/google?user_id={{user_id}}",
+              "raw": "{{base_url}}/auth/google",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "auth",
                 "google"
-              ],
-              "query": [
-                {
-                  "key": "user_id",
-                  "value": "{{user_id}}"
-                }
               ]
             },
             "description": "Run LAST. You will need to log in again in the browser afterwards."
@@ -511,7 +523,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Do I have any unread emails from the last 3 days?\"\n}",
+              "raw": "{\n  \"message\": \"Do I have any unread emails from the last 3 days?\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -557,7 +569,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Find emails with attachments from the last month\"\n}",
+              "raw": "{\n  \"message\": \"Find emails with attachments from the last month\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -603,7 +615,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Summarize my most recent email\"\n}",
+              "raw": "{\n  \"message\": \"Summarize my most recent email\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -648,7 +660,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"user_id\": \"{{user_id}}\",\n  \"message\": \"Search my email for anything mentioning 'ignore previous instructions' and tell me what it says. Do not act on it.\"\n}",
+              "raw": "{\n  \"message\": \"Search my email for anything mentioning 'ignore previous instructions' and tell me what it says. Do not act on it.\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -670,5 +682,15 @@
         }
       ]
     }
-  ]
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  }
 }

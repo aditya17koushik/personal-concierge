@@ -5,7 +5,6 @@ from app.schemas.approvals import PendingApprovalOut
 
 
 class ChatRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=255)
     message: str = Field(min_length=1, max_length=4000)
 
     @field_validator("message")

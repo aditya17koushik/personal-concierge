@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Callable
 
 from sqlalchemy.orm import Session
@@ -12,10 +12,17 @@ from app.decisions.jev import Decider
 from app.decisions.schemas import Decision
 from app.integrations.google.oauth import GoogleOAuthService
 from app.llm.base import LLMProvider
+from app.profiles.service import (
+    ProfileData,
+    ProfileService,
+    local_today,
+    seconds_until_local_midnight,
+)
 from app.schemas.agent import ChatResponse
 from app.schemas.approvals import PendingApprovalOut
 from app.schemas.llm import Message
 from app.tools.base import ToolContext
+from app.usage.service import QuotaService
 from app.tools.registry import ToolRegistry, build_default_registry
 
 logger = logging.getLogger(__name__)
@@ -74,10 +81,20 @@ PROPOSE_RULE = (
 )
 
 
-def build_system_prompt(today: date, default_currency: str, decision: Decision) -> str:
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def build_system_prompt(
+    today: date,
+    default_currency: str,
+    decision: Decision,
+    timezone_name: str | None = None,
+) -> str:
+    where = f" (the user's timezone is {timezone_name})" if timezone_name else ""
     lines = [
         "You are a helpful personal assistant. Answer clearly and concisely.",
-        f"Today's date is {today.isoformat()}. "
+        f"Today's date is {today.isoformat()}{where}. "
         "Resolve relative dates like 'yesterday' or 'last week' from it.",
         f"The user's default currency is {default_currency}.",
         "Write plain text only: no Markdown, no asterisks, no # headings, no "
@@ -122,14 +139,20 @@ class AgentService:
         approvals: ApprovalService | None = None,
         registry: ToolRegistry | None = None,
         default_currency: str = "INR",
-        today_fn: Callable[[], date] = date.today,
+        default_timezone: str = "UTC",
+        daily_message_limit: int = 0,
+        today_fn: Callable[[], date] | None = None,
+        now_fn: Callable[[], datetime] = _utcnow,
         google_oauth: GoogleOAuthService | None = None,
     ) -> None:
         self._llm = llm
         self._db = db
         self._registry = registry or build_default_registry()
         self._default_currency = default_currency
-        self._today_fn = today_fn
+        self._default_timezone = default_timezone
+        self._daily_limit = daily_message_limit
+        self._today_fn = today_fn  # tests pin the date; None = the user's local date
+        self._now_fn = now_fn
         self._google_oauth = google_oauth
         self._jev = jev
         self._approvals = approvals
@@ -151,18 +174,35 @@ class AgentService:
             pending_approvals=proposals or [],
         )
 
+    def _load_profile(self, user_id: int) -> ProfileData:
+        return ProfileService(
+            self._db, self._default_currency, self._default_timezone
+        ).get_or_create(user_id)
+
     async def chat(self, user_id: str, message: str) -> ChatResponse:
         logger.info("agent.chat user_id=%s", user_id)
 
         user = await asyncio.to_thread(
             UserRepository(self._db).get_or_create, user_id
         )
-        today = self._today_fn()
+        user_pk = user.id
+        profile = await asyncio.to_thread(self._load_profile, user_pk)
+        now = self._now_fn()
+        today = self._today_fn() if self._today_fn else local_today(profile.timezone, now)
+
+        # Before Jev and the model: a user at their limit must cost nothing.
+        await asyncio.to_thread(
+            QuotaService(self._db, self._daily_limit).consume,
+            user_pk,
+            today,
+            seconds_until_local_midnight(profile.timezone, now),
+        )
+
         ctx = ToolContext(
             db=self._db,
-            user_id=user.id,
+            user_id=user_pk,
             today=today,
-            default_currency=self._default_currency,
+            default_currency=profile.currency,
             external_user_id=user_id,
             google_oauth=self._google_oauth,
         )
@@ -195,7 +235,9 @@ class AgentService:
         messages = [
             Message(
                 role="system",
-                content=build_system_prompt(today, self._default_currency, decision),
+                content=build_system_prompt(
+                    today, profile.currency, decision, profile.timezone
+                ),
             ),
             Message(role="user", content=message),
         ]

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # Approvals
     approval_ttl_minutes: int = 30
 
+    # Users, profiles and limits
+    default_timezone: str = "UTC"  # for new profiles; users change it with /timezone
+    daily_message_limit: int = 200  # per user per local day; 0 disables
+    google_login_link_ttl_minutes: int = 10
+
     # Expenses
     default_currency: str = "INR"
 

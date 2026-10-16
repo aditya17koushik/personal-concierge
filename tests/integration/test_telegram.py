@@ -188,6 +188,7 @@ def make_rig(
             jev=Jev(StubEvaluator(answers)),
             registry=registry,
             approvals=ApprovalService(db, registry, today_fn=lambda: TODAY),
+            daily_message_limit=settings.daily_message_limit,
             today_fn=lambda: TODAY,
         )
 
@@ -201,6 +202,7 @@ def make_rig(
         agent_factory=agent_factory,
         approvals_factory=approvals_factory,
         bot_username="test_bot",
+        now_fn=lambda: datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc),  # same day as TODAY
     )
     return Rig(handler, tg, provider, session_factory, settings)
 
@@ -590,7 +592,9 @@ async def test_help_google_and_unknown_commands(session_factory):
     await rig.send("/help@test_bot")  # how Telegram addresses commands in some clients
 
     assert "/invite" in rig.tg.texts[0]  # admins see admin help
-    assert "http://127.0.0.1:8000/auth/google/login?user_id=me" in rig.tg.texts[1]
+    assert "http://127.0.0.1:8000/auth/google/login?code=" in rig.tg.texts[1]
+    assert "user_id" not in rig.tg.texts[1]  # no guessable identity in the link
+    assert "works once" in rig.tg.texts[1]
     assert "Unknown command" in rig.tg.texts[2]
     assert "Commands:" in rig.tg.texts[3]
 
@@ -843,3 +847,86 @@ async def test_polling_errors_back_off_and_recover():
 
     assert sleeps == [1.0, 2.0, 9]  # exponential backoff, then honours retry_after
     assert ("end", 1) in handler.events  # recovered and kept going
+
+
+# ------------------------------------------------------- profile + limits
+
+
+@pytest.mark.asyncio
+async def test_profile_commands(session_factory):
+    rig = make_rig(session_factory, daily_message_limit=5)
+
+    await rig.send("/profile")
+    assert "Timezone: UTC" in rig.tg.texts[-1]
+    assert "Currency: " in rig.tg.texts[-1]
+    assert "Messages today: 0 of 5" in rig.tg.texts[-1]
+
+    await rig.send("/timezone asia/kolkata")
+    assert rig.tg.texts[-1] == "Timezone set to Asia/Kolkata."
+    await rig.send("/currency usd")
+    assert rig.tg.texts[-1] == "Currency set to USD."
+    await rig.send("/units imperial")
+    assert rig.tg.texts[-1] == "Units set to imperial."
+
+    await rig.send("/profile")
+    assert "Timezone: Asia/Kolkata" in rig.tg.texts[-1]
+    assert "Currency: USD" in rig.tg.texts[-1] and "Units: imperial" in rig.tg.texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_invalid_profile_values_are_rejected_with_help(session_factory):
+    rig = make_rig(session_factory)
+
+    for command, expected in [
+        ("/timezone Mars/Olympus", "Unknown timezone"),
+        ("/currency rupees", "3-letter currency"),
+        ("/units furlongs", "metric"),
+        ("/timezone", "Usage: /timezone"),
+        ("/currency", "Usage: /currency"),
+        ("/units", "Usage: /units"),
+    ]:
+        await rig.send(command)
+        assert expected in rig.tg.texts[-1], command
+
+    await rig.send("/profile")
+    assert "Timezone: UTC" in rig.tg.texts[-1]  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_each_user_has_their_own_profile(session_factory):
+    rig = make_rig(session_factory)
+    link_user(session_factory, BOB, "tg:222")
+
+    await rig.send("/timezone Asia/Tokyo")
+    await rig.send("/profile", user=BOB)
+
+    assert "Timezone: UTC" in rig.tg.texts[-1]  # Bob is unaffected
+
+
+@pytest.mark.asyncio
+async def test_the_daily_limit_is_explained_and_does_not_burn_model_calls(session_factory):
+    rig = make_rig(session_factory, daily_message_limit=2)
+
+    for _ in range(3):
+        await rig.send("hello")
+
+    assert rig.tg.texts[:2] == ["Hello from the model"] * 2
+    assert "today's limit of 2 messages" in rig.tg.texts[-1]
+    assert "resets at midnight" in rig.tg.texts[-1]
+    assert rig.provider.calls == 2
+
+    await rig.send("/help")  # commands are free
+    assert "Commands:" in rig.tg.texts[-1]
+    await rig.send("/profile")
+    assert "Messages today: 2 of 2" in rig.tg.texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_new_users_are_told_to_set_their_timezone(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/invite")
+    code = invite_code(rig.tg.texts[-1])
+
+    await rig.send(f"/start {code}", user=BOB)
+
+    assert "/timezone" in rig.tg.texts[-1]

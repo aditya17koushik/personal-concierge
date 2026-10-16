@@ -3,26 +3,30 @@
 
 Usage (server must already be running):
 
-    python scripts/smoke_test.py                       # core checks, user "smoke-test"
-    python scripts/smoke_test.py --user-id me          # also tests Gmail if Google is connected
+    python scripts/smoke_test.py --token pa_...        # or set SMOKE_API_TOKEN
+    (create a token:  python -m app.admin token-create --user me --label smoke)
     python scripts/smoke_test.py --skip-llm            # only checks that don't call the LLM
     python scripts/smoke_test.py --base-url http://127.0.0.1:8000 --timeout 90
 
 Notes:
   * Uses the real LLM, so it costs a few cents and the model's wording varies.
     Tool-usage checks can occasionally fail on a rewording; re-run before assuming a bug.
-  * Writes a few test expenses (category "smoketest") for the chosen user.
-    The default user "smoke-test" keeps your real data clean.
+  * Writes a few test expenses (category "smoketest") for the token's user. Use a token for a
+    throwaway user to keep your real data clean:
+        python -m app.admin token-create --user smoke-test --label smoke
+    (Google checks are skipped for a user without a Google connection.)
   * Exit code: 0 = all passed/skipped, 1 = at least one failure, 2 = server unreachable.
 """
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
+from urllib.parse import urlparse
 
 MARKER_AMOUNT = "777.77"
 
@@ -48,10 +52,13 @@ class Result:
 
 
 class Runner:
-    def __init__(self, base_url: str, user_id: str, timeout: float) -> None:
-        self.user_id = user_id
-        self.client = httpx.Client(base_url=base_url, timeout=timeout)
-        self.quick = httpx.Client(base_url=base_url, timeout=min(QUICK_TIMEOUT, timeout))
+    def __init__(self, base_url: str, token: str, timeout: float) -> None:
+        headers = {"Authorization": f"Bearer {token}"}
+        self.client = httpx.Client(base_url=base_url, timeout=timeout, headers=headers)
+        self.quick = httpx.Client(
+            base_url=base_url, timeout=min(QUICK_TIMEOUT, timeout), headers=headers
+        )
+        self.anon = httpx.Client(base_url=base_url, timeout=min(QUICK_TIMEOUT, timeout))
         self.consecutive_timeouts = 0
         self.results: list[Result] = []
         self.google_connected = False
@@ -60,7 +67,7 @@ class Runner:
 
     def chat(self, message: str) -> dict[str, Any]:
         response = self.client.post(
-            "/agent/chat", json={"user_id": self.user_id, "message": message}
+            "/agent/chat", json={"message": message}
         )
         if response.status_code != 200:
             raise AssertionError(f"HTTP {response.status_code}: {response.text[:200]}")
@@ -120,34 +127,49 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
         return f"service={res.json().get('service')}"
 
     def validation_blank() -> None:
-        res = r.quick.post("/agent/chat", json={"user_id": r.user_id, "message": "   "})
+        res = r.quick.post("/agent/chat", json={"message": "   "})
         assert res.status_code == 422, f"expected 422, got {res.status_code}"
 
-    def validation_missing_user() -> None:
-        res = r.quick.post("/agent/chat", json={"message": "hi"})
-        assert res.status_code == 422, f"expected 422, got {res.status_code}"
+    def auth_no_token() -> None:
+        res = r.anon.post("/agent/chat", json={"message": "hi"})
+        assert res.status_code == 401, f"expected 401, got {res.status_code}"
+        for method, path in (("GET", "/approvals"), ("GET", "/auth/google/status")):
+            other = r.anon.request(method, path)
+            assert other.status_code == 401, f"{method} {path} -> {other.status_code}"
+
+    def auth_bad_token() -> None:
+        res = r.anon.post(
+            "/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer pa_wrong"}
+        )
+        assert res.status_code == 401, f"expected 401, got {res.status_code}"
 
     def google_status() -> str:
-        res = r.quick.get("/auth/google/status", params={"user_id": r.user_id})
+        res = r.quick.get("/auth/google/status")
         assert res.status_code == 200, f"HTTP {res.status_code}: {res.text[:120]}"
         data = res.json()
         r.google_connected = bool(data.get("connected"))
         return f"connected as {data.get('email')}" if r.google_connected else "not connected"
 
-    def login_redirect() -> None:
-        res = r.quick.get(
-            "/auth/google/login",
-            params={"user_id": r.user_id},
-            follow_redirects=False,
-        )
+    def login_redirect() -> str:
+        link = r.quick.post("/auth/google/link")
+        assert link.status_code == 200, f"link -> HTTP {link.status_code}: {link.text[:120]}"
+        parsed = urlparse(link.json()["url"])
+        path = f"{parsed.path}?{parsed.query}"
+
+        res = r.anon.get(path, follow_redirects=False)  # opened by a browser: no token
         assert res.status_code in (302, 307), f"expected redirect, got {res.status_code}: {res.text[:120]}"
         assert "accounts.google.com" in res.headers.get("location", ""), "does not redirect to Google"
 
+        again = r.anon.get(path, follow_redirects=False)
+        assert again.status_code == 400, f"link should be single-use, got {again.status_code}"
+        return "single-use link works once"
+
     r.check("GET /health", health)
     r.check("validation: blank message -> 422", validation_blank)
-    r.check("validation: missing user_id -> 422", validation_missing_user)
+    r.check("auth: no token -> 401", auth_no_token)
+    r.check("auth: wrong token -> 401", auth_bad_token)
     r.check("GET /auth/google/status", google_status)
-    r.check("GET /auth/google/login redirects to Google", login_redirect)
+    r.check("google: single-use login link -> redirect to Google", login_redirect)
 
     if skip_llm:
         print("\n--skip-llm set: skipping all checks that call the LLM")
@@ -226,27 +248,27 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
     def approval_approve() -> str:
         approval_id = propose_delete("smoketest-approve")
 
-        listed = r.client.get("/approvals", params={"user_id": r.user_id}).json()
+        listed = r.client.get("/approvals").json()
         assert approval_id in [a["id"] for a in listed], "proposal not in the pending list"
 
-        res = r.client.post(f"/approvals/{approval_id}/approve", params={"user_id": r.user_id})
+        res = r.client.post(f"/approvals/{approval_id}/approve")
         assert res.status_code == 200, f"approve -> HTTP {res.status_code}: {res.text[:160]}"
         out = res.json()
         assert out["status"] == "executed", f"status={out['status']} result={out.get('result')}"
         assert "deleted" in (out.get("result") or {}), f"result={out.get('result')}"
 
-        replay = r.client.post(f"/approvals/{approval_id}/approve", params={"user_id": r.user_id})
+        replay = r.client.post(f"/approvals/{approval_id}/approve")
         assert replay.status_code == 409, f"replay should be 409, got {replay.status_code}"
         return out["summary"]
 
     def approval_reject() -> str:
         approval_id = propose_delete("smoketest-reject")
 
-        res = r.client.post(f"/approvals/{approval_id}/reject", params={"user_id": r.user_id})
+        res = r.client.post(f"/approvals/{approval_id}/reject")
         assert res.status_code == 200, f"reject -> HTTP {res.status_code}: {res.text[:160]}"
         assert res.json()["status"] == "rejected"
 
-        listed = r.client.get("/approvals", params={"user_id": r.user_id}).json()
+        listed = r.client.get("/approvals").json()
         assert approval_id not in [a["id"] for a in listed], "rejected item still pending"
         return "rejected, and no longer pending"
 
@@ -255,7 +277,7 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
 
     def need_google() -> None:
         if not r.google_connected:
-            raise Skip(f"Google not connected for user '{r.user_id}' (use --user-id with a connected user)")
+            raise Skip("Google is not connected for this token's user (run /google in Telegram first)")
 
     def gmail_search() -> None:
         need_google()
@@ -292,14 +314,24 @@ def run_checks(r: Runner, skip_llm: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test a running Personal Agent server.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--user-id", default="smoke-test")
+    parser.add_argument(
+        "--token", default=os.environ.get("SMOKE_API_TOKEN"), help="API token (or env SMOKE_API_TOKEN)"
+    )
     parser.add_argument("--timeout", type=float, default=60.0, help="per-request timeout in seconds")
     parser.add_argument("--skip-llm", action="store_true", help="skip checks that call the LLM")
     args = parser.parse_args()
 
-    runner = Runner(args.base_url, args.user_id, args.timeout)
+    if not args.token:
+        print(
+            "No API token. Create one with:\n"
+            "  python -m app.admin token-create --user me --label smoke\n"
+            "then run with --token pa_... or set SMOKE_API_TOKEN."
+        )
+        return 2
 
-    print(f"Target: {args.base_url}   user_id: {args.user_id}\n")
+    runner = Runner(args.base_url, args.token, args.timeout)
+
+    print(f"Target: {args.base_url}\n")
     try:
         runner.quick.get("/health")
     except httpx.ConnectError:
