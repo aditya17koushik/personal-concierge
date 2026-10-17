@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import date, datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -68,6 +69,15 @@ PROMPT_SECTIONS: dict[str, str] = {
         "Use search_emails and read_email to look through the user's Gmail. "
         "You can only read email: you cannot send, delete, archive or change it. "
         "Search first, then read a specific email only when needed."
+    ),
+    "reminder": (
+        "Use create_reminder when the user asks to be reminded of something later. "
+        "Pass either at (their LOCAL time, YYYY-MM-DDTHH:MM) or in_minutes (for 'in 30 "
+        "minutes' or 'in 2 hours': do the arithmetic yourself); add repeat for 'every "
+        "day', 'on weekdays' or 'every week'. The reminder text is a short phrase like "
+        "'Call Ravi'. If no time was given, ask for it. Use list_reminders to show "
+        "them and cancel_reminder (with the id from list_reminders) to cancel one. "
+        "After creating one, confirm the exact local time you set."
     ),
     "calendar": (
         "Use list_events and get_event to look at the user's Google Calendar. To show "
@@ -148,11 +158,13 @@ def build_system_prompt(
     decision: Decision,
     timezone_name: str | None = None,
     history_has_external: bool = False,
+    now_local: datetime | None = None,
 ) -> str:
     where = f" (the user's timezone is {timezone_name})" if timezone_name else ""
+    clock = f" The time now is {now_local.strftime('%H:%M')} there." if now_local else ""
     lines = [
         "You are a helpful personal assistant. Answer clearly and concisely.",
-        f"Today's date is {today.isoformat()}{where}. "
+        f"Today's date is {today.isoformat()}{where}.{clock} "
         "Resolve relative dates like 'yesterday' or 'last week' from it.",
         f"The user's default currency is {default_currency}.",
         "Write plain text only: no Markdown, no asterisks, no # headings, no "
@@ -295,6 +307,8 @@ class AgentService:
             default_currency=profile.currency,
             external_user_id=user_id,
             google_oauth=self._google_oauth,
+            timezone=profile.timezone,
+            now=now,
         )
 
         response = await self._converse(user_id, message, ctx, profile, today, history)
@@ -368,6 +382,7 @@ class AgentService:
                     decision,
                     profile.timezone,
                     history_has_external=any(m.external for m in history),
+                    now_local=ctx.now.astimezone(ZoneInfo(profile.timezone)),
                 ),
             ),
             *[

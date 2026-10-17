@@ -17,6 +17,7 @@ from app.llm.base import LLMError
 from app.profiles.service import ProfileError, ProfileService, local_today
 from app.schemas.approvals import PendingApprovalOut
 from app.telegram.users import InviteError, LinkedUser, TelegramUsers
+from app.reminders.service import ReminderService, describe
 from app.usage.service import QuotaService, RateLimitExceeded
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,19 @@ UNAUTHORIZED = (
     "This is a private assistant. If you have an invite code, send /start <code>."
 )
 HELP_TEXT = (
-    "I can track your expenses, read your Gmail and Calendar, and more is coming.\n\n"
+    "I can track your expenses, read your Gmail, manage your Calendar (changes need your "
+    "approval) and send you reminders.\n\n"
     "Just write to me normally, for example:\n"
     "- I spent 250 on lunch\n"
     "- Any unread emails from my bank?\n"
-    "- What's on my calendar tomorrow?\n\n"
+    "- What's on my calendar tomorrow?\n"
+    "- Remind me to call Ravi at 6pm\n\n"
     "Commands:\n"
     "/new - start a fresh conversation (I forget the recent messages)\n"
     "/approvals - changes waiting for your approval\n"
+    "/reminders - your pending reminders (/reminders cancel <id>)\n"
+    "/agenda - daily morning summary (/agenda on 08:00, /agenda off)\n"
+    "/meetings - alert before meetings (/meetings 15, /meetings off)\n"
     "/google - connect your Google account\n"
     "/profile - your timezone, currency and units\n"
     "/timezone <name> - e.g. /timezone Asia/Kolkata\n"
@@ -274,6 +280,12 @@ class TelegramHandler:
             await self._send(chat_id, "Started a new conversation. I've forgotten the recent messages.")
         elif command == "/approvals":
             await self._list_approvals(link, chat_id)
+        elif command == "/reminders":
+            await self._reminders(link, chat_id, arg)
+        elif command == "/agenda":
+            await self._agenda(link, chat_id, arg)
+        elif command == "/meetings":
+            await self._meetings(link, chat_id, arg)
         elif command == "/google":
             await self._google_link(link, chat_id)
         elif command == "/profile":
@@ -301,7 +313,8 @@ class TelegramHandler:
         await self._send(
             chat_id,
             "Open this link in your browser to connect your Google account "
-            "(Gmail and Calendar, read-only). It works once and expires in "
+            "(Gmail is read-only; calendar changes happen only after you approve them). "
+            "It works once and expires in "
             f"{minutes} minutes. Only open links you requested yourself:\n"
             f"{base}/auth/google/login?code={code}",
         )
@@ -324,6 +337,18 @@ class TelegramHandler:
         ]
         if self._settings.daily_message_limit > 0:
             lines.append(f"Messages today: {used} of {self._settings.daily_message_limit}")
+        lines.append(
+            "Morning agenda: "
+            + (f"on at {profile.agenda_time}" if profile.agenda_enabled else "off (/agenda on)")
+        )
+        lines.append(
+            "Meeting alerts: "
+            + (
+                f"{profile.event_alert_minutes} minutes before"
+                if profile.event_alert_minutes
+                else "off (/meetings 15)"
+            )
+        )
         lines.append("\nChange with /timezone, /currency or /units.")
         await self._send(chat_id, "\n".join(lines))
 
@@ -344,6 +369,96 @@ class TelegramHandler:
             await self._send(chat_id, exc.message)
             return
         await self._send(chat_id, f"{label} set to {getattr(profile, field)}.")
+
+    async def _agenda(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        words = arg.split()
+        service = lambda db: ProfileService(  # noqa: E731
+            db, self._settings.default_currency, self._settings.default_timezone
+        )
+        try:
+            if not words:
+                profile = await self._db(lambda db: service(db).get_or_create(link.user_id))
+                state = f"on, at {profile.agenda_time} ({profile.timezone})" if profile.agenda_enabled else "off"
+                await self._send(
+                    chat_id,
+                    f"Morning agenda is {state}.\n/agenda on 08:00 turns it on, /agenda off turns it off.",
+                )
+                return
+            command = words[0].lower()
+            if command == "off":
+                await self._db(lambda db: service(db).set_agenda(link.user_id, False))
+                await self._send(chat_id, "Morning agenda turned off.")
+            elif command == "on":
+                time_text = words[1] if len(words) > 1 else None
+                profile = await self._db(
+                    lambda db: service(db).set_agenda(link.user_id, True, time_text)
+                )
+                await self._send(
+                    chat_id,
+                    f"Morning agenda on. You'll get it at {profile.agenda_time} "
+                    f"({profile.timezone}). Check your timezone with /profile.",
+                )
+            else:
+                await self._send(chat_id, "Usage: /agenda on 08:00   or   /agenda off")
+        except ProfileError as exc:
+            await self._send(chat_id, exc.message)
+
+    async def _meetings(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        value = arg.strip().lower()
+        service = lambda db: ProfileService(  # noqa: E731
+            db, self._settings.default_currency, self._settings.default_timezone
+        )
+        try:
+            if not value:
+                profile = await self._db(lambda db: service(db).get_or_create(link.user_id))
+                state = (
+                    f"on: {profile.event_alert_minutes} minutes before each meeting"
+                    if profile.event_alert_minutes
+                    else "off"
+                )
+                await self._send(
+                    chat_id,
+                    f"Meeting alerts are {state}.\n/meetings 15 turns them on, /meetings off turns them off.",
+                )
+            elif value == "off":
+                await self._db(lambda db: service(db).set_event_alerts(link.user_id, None))
+                await self._send(chat_id, "Meeting alerts turned off.")
+            else:
+                profile = await self._db(lambda db: service(db).set_event_alerts(link.user_id, value))
+                await self._send(
+                    chat_id,
+                    f"I'll alert you {profile.event_alert_minutes} minutes before meetings "
+                    "(checked about every 2 minutes). It needs your Google account: see /google.",
+                )
+        except ProfileError as exc:
+            await self._send(chat_id, exc.message)
+
+    async def _reminders(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        words = arg.split()
+        if words and words[0].lower() == "cancel":
+            if len(words) != 2 or not words[1].isdigit():
+                await self._send(chat_id, "Usage: /reminders cancel <id>")
+                return
+            done = await self._db(
+                lambda db: ReminderService(db).cancel(link.user_id, int(words[1]))
+            )
+            await self._send(
+                chat_id, "Reminder cancelled." if done else "I couldn't find that reminder."
+            )
+            return
+
+        items = await self._db(
+            lambda db: [describe(r) for r in ReminderService(db).pending(link.user_id)]
+        )
+        if not items:
+            await self._send(chat_id, "You have no pending reminders. Try: remind me to call Ravi at 6pm")
+            return
+        lines = ["Your reminders:"]
+        for item in items:
+            repeat = f" (repeats {item['repeat']})" if item["repeat"] else ""
+            lines.append(f"#{item['id']}  {item['when']}  {item['text']}{repeat}")
+        lines.append("\nCancel one with /reminders cancel <id>.")
+        await self._send(chat_id, "\n".join(lines))
 
     async def _invite(self, admin: LinkedUser, chat_id: int) -> None:
         code, _expires = await self._db(

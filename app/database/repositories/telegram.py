@@ -18,6 +18,9 @@ class TelegramRepository:
             select(TelegramLink).where(TelegramLink.telegram_user_id == telegram_id)
         )
 
+    def get_link_for_user(self, user_id: int) -> TelegramLink | None:
+        return self._db.scalar(select(TelegramLink).where(TelegramLink.user_id == user_id))
+
     def create_link(
         self, telegram_id: int, user_id: int, display_name: str | None
     ) -> TelegramLink:

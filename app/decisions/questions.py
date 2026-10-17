@@ -6,6 +6,7 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
     "expense": "the user's own expenses (recording, listing, summarising or deleting spending)",
     "email": "the user's Gmail account (finding, reading or sending emails)",
     "calendar": "the user's Google Calendar (looking at, creating, moving or cancelling events)",
+    "reminder": "the user's reminders (setting a reminder to be messaged later, listing or cancelling reminders)",
 }
 
 RISK_LEVELS = ("low", "medium", "high")

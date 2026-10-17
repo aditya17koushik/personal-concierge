@@ -112,5 +112,6 @@ def build_default_registry() -> ToolRegistry:
     from app.tools.calendar.tools import CALENDAR_TOOLS
     from app.tools.expenses.tools import EXPENSE_TOOLS
     from app.tools.gmail.tools import GMAIL_TOOLS
+    from app.tools.reminders.tools import REMINDER_TOOLS
 
-    return ToolRegistry([*EXPENSE_TOOLS, *GMAIL_TOOLS, *CALENDAR_TOOLS])
+    return ToolRegistry([*EXPENSE_TOOLS, *GMAIL_TOOLS, *CALENDAR_TOOLS, *REMINDER_TOOLS])

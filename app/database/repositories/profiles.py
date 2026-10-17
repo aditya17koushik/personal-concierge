@@ -1,3 +1,6 @@
+from datetime import date
+
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -46,3 +49,54 @@ class ProfileRepository:
         self._db.commit()
         self._db.refresh(profile)
         return profile
+
+    def set_nudges(
+        self,
+        profile: UserProfile,
+        *,
+        agenda_enabled: bool | None = None,
+        agenda_time: str | None = None,
+        event_alert_minutes: int | None = None,
+        clear_event_alerts: bool = False,
+    ) -> UserProfile:
+        if agenda_enabled is not None:
+            profile.agenda_enabled = agenda_enabled
+        if agenda_time is not None:
+            profile.agenda_time = agenda_time
+        if clear_event_alerts:
+            profile.event_alert_minutes = None
+        elif event_alert_minutes is not None:
+            profile.event_alert_minutes = event_alert_minutes
+        self._db.commit()
+        self._db.refresh(profile)
+        return profile
+
+    def claim_agenda(self, user_id: int, day: date) -> bool:
+        """Claim today's agenda: True only for the caller that gets to send it."""
+        result = self._db.execute(
+            update(UserProfile)
+            .where(
+                UserProfile.user_id == user_id,
+                (UserProfile.last_agenda_on.is_(None)) | (UserProfile.last_agenda_on < day),
+            )
+            .values(last_agenda_on=day)
+        )
+        self._db.commit()
+        return result.rowcount == 1  # type: ignore[attr-defined]
+
+    def release_agenda(self, user_id: int, previous: date | None) -> None:
+        """Sending failed: let the next poll try again."""
+        self._db.execute(
+            update(UserProfile).where(UserProfile.user_id == user_id).values(last_agenda_on=previous)
+        )
+        self._db.commit()
+
+    def with_nudges(self) -> list[UserProfile]:
+        return list(
+            self._db.scalars(
+                select(UserProfile).where(
+                    (UserProfile.agenda_enabled.is_(True))
+                    | (UserProfile.event_alert_minutes.is_not(None))
+                )
+            )
+        )

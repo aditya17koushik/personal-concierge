@@ -10,6 +10,7 @@ from app.agent.factory import build_agent_service, build_approval_service
 from app.config import get_settings
 from app.database.session import SessionLocal
 from app.integrations.telegram.client import TelegramClient, TelegramError
+from app.scheduler.runner import SchedulerRunner
 from app.telegram.bot import TelegramBot
 from app.telegram.handler import TelegramHandler
 
@@ -59,8 +60,22 @@ async def amain(check_only: bool) -> int:
     )
     bot = TelegramBot(client, handler, poll_timeout=settings.telegram_poll_timeout)
 
+    stop = asyncio.Event()
+    scheduler_task: asyncio.Task[None] | None = None
+    if settings.scheduler_enabled:
+        scheduler = SchedulerRunner(client, SessionLocal, settings)
+        scheduler_task = asyncio.create_task(scheduler.run(stop))
+        print("Scheduler running (reminders, morning agenda, meeting alerts).")
+    else:
+        print("Scheduler is disabled (SCHEDULER_ENABLED=false): no reminders will be sent.")
+
     print("Listening for messages. Press Ctrl+C to stop.")
-    await bot.run()
+    try:
+        await bot.run(stop)
+    finally:
+        stop.set()
+        if scheduler_task is not None:
+            await scheduler_task
     return 0
 
 

@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import BaseModel
@@ -21,6 +21,8 @@ class ToolContext:
     default_currency: str
     external_user_id: str = ""
     google_oauth: "GoogleOAuthService | None" = None
+    timezone: str = "UTC"  # the user's profile timezone
+    now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 ToolResult = dict[str, Any]

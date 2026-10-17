@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     history_max_chars: int = 6000  # rough budget (about 1,500 tokens)
     history_retention_days: int = 7  # older rows are deleted
 
+    # Reminders and scheduler (runs inside `python -m app.telegram`)
+    scheduler_enabled: bool = True
+    scheduler_tick_seconds: float = 20.0  # how often due reminders are looked for
+    calendar_poll_seconds: float = 120.0  # how often calendars are checked (agenda, alerts)
+    reminder_max_pending: int = 50  # per user
+    reminder_late_hours: int = 24  # a reminder missed by more than this is dropped, not sent
+    reminder_max_days_ahead: int = 366
+    agenda_window_hours: int = 2  # an agenda is sent only within this long after its time
+
     # Expenses
     default_currency: str = "INR"
 

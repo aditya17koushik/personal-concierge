@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from sqlalchemy.orm import Session
 
+from app.database.models import UserProfile
 from app.database.repositories.profiles import ProfileRepository
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,41 @@ class ProfileData:
     timezone: str
     currency: str
     unit_system: str
+    agenda_enabled: bool = False
+    agenda_time: str = "08:00"
+    event_alert_minutes: int | None = None
+
+
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+MAX_ALERT_MINUTES = 120
+
+
+def normalize_time(value: str) -> str:
+    match = _TIME_RE.match(value.strip())
+    if not match:
+        raise ProfileError("Use a 24-hour time like 08:00 or 7:30.")
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
+def normalize_alert_minutes(value: str | int) -> int:
+    try:
+        minutes = int(str(value).strip())
+    except ValueError:
+        raise ProfileError("Use a number of minutes, for example /meetings 15, or /meetings off.")
+    if not 1 <= minutes <= MAX_ALERT_MINUTES:
+        raise ProfileError(f"Choose between 1 and {MAX_ALERT_MINUTES} minutes.")
+    return minutes
+
+
+def _data(profile: "UserProfile") -> ProfileData:
+    return ProfileData(
+        profile.timezone,
+        profile.currency,
+        profile.unit_system,
+        bool(profile.agenda_enabled),
+        profile.agenda_time or "08:00",
+        profile.event_alert_minutes,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -104,7 +140,7 @@ class ProfileService:
         if profile is None:
             timezone_name, currency = self._defaults()
             profile = self._repo.create(user_id, timezone_name, currency, "metric")
-        return ProfileData(profile.timezone, profile.currency, profile.unit_system)
+        return _data(profile)
 
     def update(
         self,
@@ -123,4 +159,27 @@ class ProfileService:
         profile = self._repo.get(user_id)
         assert profile is not None
         profile = self._repo.update(profile, **changes)
-        return ProfileData(profile.timezone, profile.currency, profile.unit_system)
+        return _data(profile)
+
+    def set_agenda(
+        self, user_id: int, enabled: bool, time_text: str | None = None
+    ) -> ProfileData:
+        agenda_time = normalize_time(time_text) if time_text else None
+        self.get_or_create(user_id)
+        profile = self._repo.get(user_id)
+        assert profile is not None
+        return _data(
+            self._repo.set_nudges(profile, agenda_enabled=enabled, agenda_time=agenda_time)
+        )
+
+    def set_event_alerts(self, user_id: int, minutes: str | int | None) -> ProfileData:
+        """minutes=None switches meeting alerts off."""
+        value = normalize_alert_minutes(minutes) if minutes is not None else None
+        self.get_or_create(user_id)
+        profile = self._repo.get(user_id)
+        assert profile is not None
+        return _data(
+            self._repo.set_nudges(
+                profile, event_alert_minutes=value, clear_event_alerts=value is None
+            )
+        )

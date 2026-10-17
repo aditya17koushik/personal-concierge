@@ -471,6 +471,30 @@ def run_checks(r: Runner, skip_llm: bool, include_disconnect: bool = False) -> N
         assert res.status_code == 200, f"reject -> HTTP {res.status_code}"
         return pending[0].get("summary", "proposed, then rejected")
 
+    def reminders_list() -> str:
+        res = r.client.get("/reminders")
+        assert res.status_code == 200, f"HTTP {res.status_code}: {res.text[:160]}"
+        return f"{len(res.json())} pending"
+
+    def reminders_cancel_unknown() -> None:
+        res = r.client.delete("/reminders/999999999")
+        assert res.status_code == 404, f"expected 404, got {res.status_code}"
+
+    def reminder_create_and_cancel() -> str:
+        body = r.chat("Remind me to smoketest-reminder in 3 hours")
+        assert_tools(body, "create_reminder")
+        listed = r.client.get("/reminders").json()
+        mine = [x for x in listed if "smoketest-reminder" in x["text"]]
+        assert mine, f"reminder not listed: {listed}"
+        for item in mine:  # never leave a real reminder behind
+            res = r.client.delete(f"/reminders/{item['id']}")
+            assert res.status_code == 200, f"cancel -> HTTP {res.status_code}"
+        assert not [x for x in r.client.get("/reminders").json() if "smoketest-reminder" in x["text"]]
+        return "created by chat, listed, cancelled"
+
+    r.check("GET /reminders", reminders_list)
+    r.check("DELETE /reminders/{id}: unknown id is 404", reminders_cancel_unknown)
+    r.check("reminder: created by chat, listed, cancelled", reminder_create_and_cancel)
     r.check("calendar: free time", calendar_free_time)
     r.check("calendar: create event is proposed, never run (rejected)", calendar_create_is_gated)
     r.check("calendar: list events", calendar_list)

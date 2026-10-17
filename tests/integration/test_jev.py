@@ -25,7 +25,7 @@ from app.tools.base import Tool
 from app.tools.registry import ToolRegistry, build_default_registry
 
 TODAY = date(2026, 10, 9)
-DOMAINS = ["calendar", "email", "expense"]
+DOMAINS = ["calendar", "email", "expense", "reminder"]
 
 
 # ------------------------------------------------------------------ helpers
@@ -388,6 +388,7 @@ def real_answers(
             "needs_calendar": {"type": "noul", "noul": cal},
             "needs_email": {"type": "noul", "noul": email},
             "needs_expense": {"type": "noul", "noul": exp},
+            "needs_reminder": {"type": "noul", "noul": 0.0},
             "risk": {
                 "type": "choice",
                 "choice": "high" if p_high >= 0.5 else "low",

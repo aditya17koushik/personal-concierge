@@ -207,6 +207,15 @@ class UserProfile(Base):
     timezone: Mapped[str] = mapped_column(String(64))
     currency: Mapped[str] = mapped_column(String(3))
     unit_system: Mapped[str] = mapped_column(String(10))  # metric | imperial
+    # Telegram nudges (all opt-in): a daily agenda, and an alert before meetings.
+    agenda_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    agenda_time: Mapped[str] = mapped_column(
+        String(5), default="08:00", server_default="08:00"
+    )  # HH:MM, in the user's timezone
+    last_agenda_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    event_alert_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -270,3 +279,53 @@ class ConversationMessage(Base):
     # An assistant reply built from email/calendar content may quote strangers.
     external_content: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class Reminder(Base):
+    """Something the user asked to be messaged about later."""
+
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    text: Mapped[str] = mapped_column(String(300))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # The user's timezone when it was set: a daily 08:00 reminder stays at 08:00 local.
+    timezone: Mapped[str] = mapped_column(String(64))
+    repeat: Mapped[str | None] = mapped_column(String(10), nullable=True)  # daily|weekdays|weekly
+    # pending | sending | sent | cancelled | failed | expired
+    status: Mapped[str] = mapped_column(String(10), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EventAlert(Base):
+    """Remembers that a meeting alert was sent, so it is never sent twice."""
+
+    __tablename__ = "event_alerts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "event_id", "starts_at", name="uq_alert_user_event_start"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    event_id: Mapped[str] = mapped_column(String(128))
+    starts_at: Mapped[str] = mapped_column(String(40))  # the event's start, as Google gave it
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )

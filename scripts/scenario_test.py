@@ -398,6 +398,79 @@ def _(r: Runner) -> str:
 # -------------------------------------------------------------------- email
 
 
+# ---------------------------------------------------------------- reminders
+
+
+def cancel_matching(r: Runner, needle: str) -> None:
+    for item in r.client.get("/reminders").json():
+        if needle in item["text"]:
+            r.client.delete(f"/reminders/{item['id']}")
+
+
+@scenario("reminders", "relative reminder is created without approval and can be cancelled")
+def _(r: Runner) -> str:
+    fresh(r)
+    try:
+        body = r.chat("Remind me to scenario-stretch in 2 hours")
+        assert "create_reminder" in body["tools_used"], describe(body)
+        assert not pending_of(body), "reminders should not need approval"
+        listed = [x for x in r.client.get("/reminders").json() if "scenario-stretch" in x["text"]]
+        assert len(listed) == 1, f"expected exactly one reminder, got {listed}"
+        return f"due {listed[0]['when']}"
+    finally:
+        cancel_matching(r, "scenario-stretch")
+
+
+@scenario("reminders", "clock time today/tomorrow is stored in the user's timezone")
+def _(r: Runner) -> str:
+    fresh(r)
+    try:
+        body = r.chat("Remind me to scenario-call tomorrow at 6pm")
+        assert "create_reminder" in body["tools_used"], describe(body)
+        listed = [x for x in r.client.get("/reminders").json() if "scenario-call" in x["text"]]
+        assert listed, "reminder was not stored"
+        assert "18:00" in listed[0]["when"], f"wrong time stored: {listed[0]['when']}"
+        return listed[0]["when"]
+    finally:
+        cancel_matching(r, "scenario-call")
+
+
+@scenario("reminders", "no time given -> asks instead of guessing")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("Remind me to scenario-vague")
+    cancel_matching(r, "scenario-vague")
+    assert "create_reminder" not in body["tools_used"], "created a reminder without a time"
+    return "asked for a time"
+
+
+@scenario("reminders", "past time is refused, nothing is stored")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("Remind me to scenario-past yesterday at 9am")
+    stored = [x for x in r.client.get("/reminders").json() if "scenario-past" in x["text"]]
+    cancel_matching(r, "scenario-past")
+    assert not stored, f"a reminder in the past was stored: {stored}"
+    return f"tools={body['tools_used']}"
+
+
+@scenario("reminders", "reminders are private to each user")
+def _(r: Runner) -> str:
+    fresh(r)
+    with other_client() as other:
+        try:
+            r.chat("Remind me to scenario-private in 2 hours")
+            theirs = [x for x in other.get("/reminders").json() if "scenario-private" in x["text"]]
+            assert not theirs, "the second user can see the first user's reminder"
+            mine = [x for x in r.client.get("/reminders").json() if "scenario-private" in x["text"]]
+            if mine:
+                res = other.delete(f"/reminders/{mine[0]['id']}")
+                assert res.status_code == 404, f"other user cancelled it: HTTP {res.status_code}"
+            return "isolated"
+        finally:
+            cancel_matching(r, "scenario-private")
+
+
 @scenario("email", "search and read (read-only)")
 def _(r: Runner) -> str:
     need_google(r)

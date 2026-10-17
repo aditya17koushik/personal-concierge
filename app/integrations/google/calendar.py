@@ -351,3 +351,46 @@ class CalendarClient:
                 {"attendees": updated},
             )
         return summarize_event(event)
+
+    async def upcoming_events(self, now: datetime, minutes: int) -> list[dict[str, Any]]:
+        """Timed events that START within the next `minutes` (not already begun)."""
+        async with self._client() as client:
+            tz_name, tz = await self._tz(client)
+            horizon = now + timedelta(minutes=minutes)
+            data = await self._get(
+                client,
+                "/calendars/primary/events",
+                {
+                    "timeMin": now.isoformat(),
+                    "timeMax": horizon.isoformat(),
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": 20,
+                    "timeZone": tz_name,
+                },
+            )
+
+        found: list[dict[str, Any]] = []
+        for event in data.get("items") or []:
+            begin = (event.get("start") or {}).get("dateTime")
+            if not begin or event.get("status") == "cancelled":
+                continue
+            if event.get("transparency") == "transparent":
+                continue
+            me = next((a for a in event.get("attendees") or [] if a.get("self")), None)
+            if me and me.get("responseStatus") == "declined":
+                continue
+            starts = datetime.fromisoformat(begin).astimezone(tz)
+            if starts <= now or starts > horizon:
+                continue
+            found.append(
+                {
+                    "id": event.get("id") or "",
+                    "title": event.get("summary") or "(no title)",
+                    "start_raw": begin,
+                    "starts": starts,
+                    "location": event.get("location"),
+                    "meeting_link": _meeting_link(event),
+                }
+            )
+        return found
