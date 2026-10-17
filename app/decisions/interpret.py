@@ -1,7 +1,7 @@
 """Turns Jev's calibrated probabilities into a proposal. Thresholds live in
 config, so tuning behaviour never means editing a prompt."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.decisions.questions import RISK_LEVELS
@@ -19,6 +19,13 @@ class Thresholds:
     domain: float = 0.6
     high_risk: float = 0.3
     refuse: float = 0.8
+    # Per-domain overrides. Fitness statements ("I weigh 78 kg") score lower than other
+    # domains, and wrongly offering its tools is harmless: they are low risk and every
+    # delete is approval-gated. So it needs a lower bar.
+    domain_overrides: dict[str, float] = field(default_factory=lambda: {"fitness": 0.4})
+
+    def for_domain(self, domain: str) -> float:
+        return self.domain_overrides.get(domain, self.domain)
 
 
 def _probability(value: Any) -> float:
@@ -66,7 +73,7 @@ def interpret(
     for domain in sorted(domains):
         p = _noul(answers, f"needs_{domain}")
         scores[f"needs_{domain}"] = round(p, 3)
-        if p >= thresholds.domain:
+        if p >= thresholds.for_domain(domain):
             needed.append(domain)
 
     risk, p_high = _risk(answers, thresholds)

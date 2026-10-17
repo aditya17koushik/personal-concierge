@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
 from sqlalchemy.orm import Session
@@ -17,6 +17,13 @@ from app.llm.base import LLMError
 from app.profiles.service import ProfileError, ProfileService, local_today
 from app.schemas.approvals import PendingApprovalOut
 from app.telegram.users import InviteError, LinkedUser, TelegramUsers
+from app.fitness.service import (
+    FitnessService,
+    format_day,
+    format_goal,
+    format_progress,
+    goal_out,
+)
 from app.reminders.service import ReminderService, describe
 from app.usage.service import QuotaService, RateLimitExceeded
 
@@ -40,10 +47,14 @@ HELP_TEXT = (
     "- I spent 250 on lunch\n"
     "- Any unread emails from my bank?\n"
     "- What's on my calendar tomorrow?\n"
-    "- Remind me to call Ravi at 6pm\n\n"
+    "- Remind me to call Ravi at 6pm\n"
+    "- Had 2 rotis and dal for lunch / I weigh 78.5 / I did a 5 km run\n\n"
     "Commands:\n"
     "/new - start a fresh conversation (I forget the recent messages)\n"
     "/approvals - changes waiting for your approval\n"
+    "/today - what you ate, trained and weigh today (/today yesterday)\n"
+    "/progress - weight, food and training trend (/progress 7, /progress 90)\n"
+    "/goal - your current goal and targets\n"
     "/reminders - your pending reminders (/reminders cancel <id>)\n"
     "/agenda - daily morning summary (/agenda on 08:00, /agenda off)\n"
     "/meetings - alert before meetings (/meetings 15, /meetings off)\n"
@@ -280,6 +291,8 @@ class TelegramHandler:
             await self._send(chat_id, "Started a new conversation. I've forgotten the recent messages.")
         elif command == "/approvals":
             await self._list_approvals(link, chat_id)
+        elif command in ("/today", "/progress", "/goal"):
+            await self._fitness(link, chat_id, command, arg)
         elif command == "/reminders":
             await self._reminders(link, chat_id, arg)
         elif command == "/agenda":
@@ -459,6 +472,34 @@ class TelegramHandler:
             lines.append(f"#{item['id']}  {item['when']}  {item['text']}{repeat}")
         lines.append("\nCancel one with /reminders cancel <id>.")
         await self._send(chat_id, "\n".join(lines))
+
+    async def _fitness(self, link: LinkedUser, chat_id: int, command: str, arg: str) -> None:
+        """Read-only views of the fitness log. Text is built by code, not by the model."""
+        now = self._now_fn()
+
+        def load(db: Session) -> str:
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            today = local_today(profile.timezone, now)
+            svc = FitnessService(db)
+            if command == "/today":
+                day = today - timedelta(days=1) if arg.strip().lower() == "yesterday" else today
+                return format_day(svc.day_summary(link.user_id, day, today))
+            if command == "/progress":
+                word = arg.strip()
+                if word and not word.isdigit():
+                    return "Usage: /progress 30   (number of days, 1-365)"
+                days = int(word) if word else 30
+                if not 1 <= days <= 365:
+                    return "Days must be between 1 and 365."
+                return format_progress(svc.progress(link.user_id, today, days))
+            goal = svc.goals.get(link.user_id)
+            if goal is None:
+                return "No goal yet. Tell me, for example: I want to cut, target 72 kg."
+            return format_goal(goal_out(goal, svc.unit(link.user_id)))
+
+        await self._send(chat_id, await self._db(load))
 
     async def _invite(self, admin: LinkedUser, chat_id: int) -> None:
         code, _expires = await self._db(

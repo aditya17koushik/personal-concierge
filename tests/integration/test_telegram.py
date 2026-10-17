@@ -120,6 +120,7 @@ def real_answers(cal: float, email: float, exp: float, p_high: float) -> dict[st
             "needs_email": {"type": "noul", "noul": email},
             "needs_expense": {"type": "noul", "noul": exp},
             "needs_reminder": {"type": "noul", "noul": 0.0},
+            "needs_fitness": {"type": "noul", "noul": 0.0},
             "risk": {
                 "type": "choice",
                 "choice": "low",
@@ -977,3 +978,66 @@ async def test_new_is_listed_in_help(session_factory):
     rig = make_rig(session_factory)
     await rig.send("/help")
     assert "/new" in rig.tg.texts[-1]
+
+
+# ------------------------------------------------------------- fitness commands
+
+
+def fitness_user(rig: Rig) -> int:
+    return internal_user(rig.factory, rig.settings.telegram_admin_external_id)
+
+
+@pytest.mark.asyncio
+async def test_today_progress_and_goal_commands_are_read_only_views(session_factory):
+    from app.database.repositories.fitness import MealRepository, WeightRepository
+    from app.fitness.service import FitnessService
+
+    rig = make_rig(session_factory)
+    await rig.send("/profile")  # first contact links the admin
+    uid = fitness_user(rig)
+
+    await rig.send("/today")
+    assert "0 kcal eaten" in rig.tg.texts[-1] and "No meals logged" in rig.tg.texts[-1]
+
+    with session_factory() as db:
+        MealRepository(db).add(uid, TODAY, "lunch", "dal and rice", 600, None, None, None, True)
+        MealRepository(db).add(uid, TODAY - timedelta(days=1), "dinner", "pasta", 800, None, None, None, True)
+        WeightRepository(db).upsert(uid, TODAY, Decimal("80.0"))
+    await rig.send("/today")
+    assert "600 kcal eaten" in rig.tg.texts[-1] and "dal and rice" in rig.tg.texts[-1]
+    assert "(est.)" in rig.tg.texts[-1] and "Weight: 80.0 kg" in rig.tg.texts[-1]
+
+    await rig.send("/today yesterday")
+    assert "800 kcal eaten" in rig.tg.texts[-1] and "pasta" in rig.tg.texts[-1]
+
+    await rig.send("/goal")
+    assert "No goal yet" in rig.tg.texts[-1]
+    with session_factory() as db:
+        FitnessService(db).set_goal(
+            uid, mode="cut", target_weight=75, unit=None, daily_calories=2000,
+            daily_protein_g=None, weekly_workouts=None, today=TODAY,
+        )  # fmt: skip
+    await rig.send("/goal")
+    assert "Goal: cut" in rig.tg.texts[-1] and "Target weight: 75.0 kg" in rig.tg.texts[-1]
+    await rig.send("/today")
+    assert "of 2000 (1400 left)" in rig.tg.texts[-1]
+
+    await rig.send("/progress 7")
+    assert "Progress, last 7 days" in rig.tg.texts[-1] and "goal: cut" in rig.tg.texts[-1]
+    assert rig.provider.calls == 0  # none of this involved the model
+
+
+@pytest.mark.asyncio
+async def test_progress_command_validates_its_argument(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/profile")
+    for arg, expected in (("abc", "Usage: /progress"), ("0", "between 1 and 365"), ("999", "between 1 and 365")):
+        await rig.send(f"/progress {arg}")
+        assert expected in rig.tg.texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_fitness_commands_need_an_invite(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/today", user=999)
+    assert rig.tg.texts[-1].startswith("This is a private assistant")

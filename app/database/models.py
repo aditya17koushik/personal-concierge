@@ -329,3 +329,88 @@ class EventAlert(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+
+class Meal(Base):
+    """One thing the user ate. Numbers may be the user's or the model's estimate."""
+
+    __tablename__ = "meals"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    eaten_on: Mapped[date] = mapped_column(Date, index=True)  # the user's local date
+    meal_type: Mapped[str] = mapped_column(String(10))  # breakfast|lunch|dinner|snack
+    description: Mapped[str] = mapped_column(String(300))
+    calories: Mapped[int] = mapped_column(Integer)
+    protein_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    carbs_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    fat_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    estimated: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class Workout(Base):
+    __tablename__ = "workouts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    done_on: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(12))  # strength|cardio|walk|run|cycle|yoga|sport|other
+    description: Mapped[str] = mapped_column(String(300))
+    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calories_burned: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class BodyWeight(Base):
+    """Weigh-ins, always stored in kg. One per user per day (a new one replaces it)."""
+
+    __tablename__ = "body_weights"
+    __table_args__ = (UniqueConstraint("user_id", "measured_on", name="uq_weight_user_day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    measured_on: Mapped[date] = mapped_column(Date, index=True)
+    weight_kg: Mapped[Decimal] = mapped_column(Numeric(6, 2))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class FitnessGoal(Base):
+    """A user's current goal (one per user): cut, bulk or maintain, with optional targets."""
+
+    __tablename__ = "fitness_goals"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    mode: Mapped[str] = mapped_column(String(10))  # cut|bulk|maintain
+    target_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    start_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    daily_calories: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    daily_protein_g: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekly_workouts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_on: Mapped[date] = mapped_column(Date)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

@@ -402,6 +402,7 @@ def real_answers(cal: float, email: float, exp: float, p_high: float) -> dict[st
             "needs_email": {"type": "noul", "noul": email},
             "needs_expense": {"type": "noul", "noul": exp},
             "needs_reminder": {"type": "noul", "noul": 0.0},
+            "needs_fitness": {"type": "noul", "noul": 0.0},
             "risk": {
                 "type": "choice",
                 "choice": "low",

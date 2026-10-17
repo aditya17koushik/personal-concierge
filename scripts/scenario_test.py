@@ -471,6 +471,128 @@ def _(r: Runner) -> str:
             cancel_matching(r, "scenario-private")
 
 
+# ----------------------------------------------------------------- fitness
+
+
+def day_of(r: Runner) -> dict[str, Any]:
+    res = r.client.get("/fitness/day")
+    assert res.status_code == 200, f"/fitness/day -> HTTP {res.status_code}"
+    return res.json()
+
+
+def remove_meals(r: Runner, needle: str) -> None:
+    """Clean up through the real approval flow, approving only what we created."""
+    for meal in day_of(r)["meals"]:
+        if needle in meal["description"].lower():
+            body = r.chat(f"Delete meal {meal['id']}")
+            for item in pending_of(body):
+                if item["tool"] == "delete_log_entry":
+                    r.client.post(f"/approvals/{item['id']}/approve")
+                else:
+                    r.client.post(f"/approvals/{item['id']}/reject")
+
+
+@scenario("fitness", "a meal in plain words is logged without asking for numbers")
+def _(r: Runner) -> str:
+    fresh(r)
+    before = day_of(r)["calories"]
+    body = r.chat("I had a scenario-bowl: 2 rotis, dal and a bowl of curd for lunch")
+    try:
+        assert "log_meal" in body["tools_used"], describe(body)
+        assert not pending_of(body), "logging food must not need approval"
+        after = day_of(r)
+        assert after["calories"] > before, "no calories were added"
+        assert after["some_estimated"], "an estimated meal must be marked as estimated"
+        reply = body["reply"].lower()
+        assert "estimate" in reply or "approx" in reply or "about" in reply, (
+            f"reply does not say the numbers are estimates: {body['reply'][:200]!r}"
+        )
+        return f"+{after['calories'] - before} kcal"
+    finally:
+        remove_meals(r, "scenario-bowl")
+
+
+@scenario("fitness", "stated calories are used exactly")
+def _(r: Runner) -> str:
+    fresh(r)
+    before = day_of(r)["calories"]
+    body = r.chat("Log a scenario-shake for 250 calories with 30g protein")
+    try:
+        assert "log_meal" in body["tools_used"], describe(body)
+        added = day_of(r)["calories"] - before
+        assert added == 250, f"expected +250 kcal, got +{added}"
+        return "+250 kcal"
+    finally:
+        remove_meals(r, "scenario-shake")
+
+
+@scenario("fitness", "'calories left today' answers from real data")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("How many calories have I had today?")
+    assert "get_day_summary" in body["tools_used"] or "list_meals" in body["tools_used"], describe(body)
+    assert str(day_of(r)["calories"]) in body["reply"].replace(",", ""), (
+        f"reply does not contain today's real total: {body['reply'][:200]!r}"
+    )
+    return "matches /fitness/day"
+
+
+@scenario("fitness", "deleting a logged meal is proposed, not done")
+def _(r: Runner) -> str:
+    fresh(r)
+    r.chat("I had a scenario-snack, about 150 calories")
+    meals = [m for m in day_of(r)["meals"] if "scenario-snack" in m["description"].lower()]
+    assert meals, "setup failed: the snack was not logged"
+    try:
+        body = r.chat("Delete the scenario-snack I just logged")
+        assert "delete_log_entry" not in body["tools_used"], "deleted without approval!"
+        proposals = [p for p in pending_of(body) if p["tool"] == "delete_log_entry"]
+        assert proposals, f"no delete proposal. {describe(body)}"
+        assert any(m["id"] == meals[0]["id"] for m in day_of(r)["meals"]), "meal vanished early"
+        reject_all(r, body)
+        return "proposed, then rejected; meal still there"
+    finally:
+        remove_meals(r, "scenario-snack")
+
+
+@scenario("fitness", "absurd weight is refused, nothing stored")
+def _(r: Runner) -> str:
+    fresh(r)
+    before = r.client.get("/fitness/progress", params={"days": 1}).json()["weight"]["weigh_ins"]
+    body = r.chat("I weigh 8 kg today")
+    after = r.client.get("/fitness/progress", params={"days": 1}).json()["weight"]["weigh_ins"]
+    assert after == before, "an impossible weight was stored"
+    return f"tools={body['tools_used']}"
+
+
+@scenario("fitness", "a goal can be read back")
+def _(r: Runner) -> str:
+    fresh(r)
+    res = r.client.get("/fitness/goal")
+    if res.status_code == 404:
+        raise Skip("no goal set for this user; set one in chat first to run this")
+    mode = res.json()["mode"]
+    body = r.chat("What is my current fitness goal?")
+    assert "get_goal" in body["tools_used"], describe(body)
+    assert mode in body["reply"].lower(), f"reply does not mention '{mode}': {body['reply'][:160]!r}"
+    return mode
+
+
+@scenario("fitness", "food data is private to each user")
+def _(r: Runner) -> str:
+    fresh(r)
+    with other_client() as other:
+        try:
+            r.chat("I had a scenario-private meal, 100 calories")
+            theirs = other.get("/fitness/day").json()["meals"]
+            assert not [m for m in theirs if "scenario-private" in m["description"].lower()], (
+                "the second user can see the first user's meal"
+            )
+            return "isolated"
+        finally:
+            remove_meals(r, "scenario-private")
+
+
 @scenario("email", "search and read (read-only)")
 def _(r: Runner) -> str:
     need_google(r)

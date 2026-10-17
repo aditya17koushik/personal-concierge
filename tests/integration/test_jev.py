@@ -25,7 +25,7 @@ from app.tools.base import Tool
 from app.tools.registry import ToolRegistry, build_default_registry
 
 TODAY = date(2026, 10, 9)
-DOMAINS = ["calendar", "email", "expense", "reminder"]
+DOMAINS = ["calendar", "email", "expense", "fitness", "reminder"]
 
 
 # ------------------------------------------------------------------ helpers
@@ -247,8 +247,9 @@ def test_high_risk_with_no_domain_offers_gated_tools_as_proposals():
     )
     assert decision.action == "needs_approval"
     assert decision.intents == ["general"]
-    assert set(decision.blocked_tools) == {"delete_expense", "create_event", "update_event", "delete_event", "rsvp_event"}
+    assert set(decision.blocked_tools) == {"delete_expense", "delete_log_entry", "create_event", "update_event", "delete_event", "rsvp_event"}
     assert set(decision.allowed_tools) == {
+        "list_meals", "list_workouts", "list_weights", "get_goal", "get_day_summary", "get_progress",
         "list_expenses", "get_expense_summary", "list_events", "get_event", "find_free_time",
     }
 
@@ -389,6 +390,7 @@ def real_answers(
             "needs_email": {"type": "noul", "noul": email},
             "needs_expense": {"type": "noul", "noul": exp},
             "needs_reminder": {"type": "noul", "noul": 0.0},
+            "needs_fitness": {"type": "noul", "noul": 0.0},
             "risk": {
                 "type": "choice",
                 "choice": "high" if p_high >= 0.5 else "low",
@@ -701,6 +703,8 @@ async def test_high_risk_with_no_domain_goes_to_propose_mode_not_a_dead_end(db: 
     assert result.pending_approvals == []
     assert len(provider.calls) == 1  # the model decided, not a canned refusal
     assert provider.calls[0].tool_names == {
+        "list_meals", "list_workouts", "list_weights", "get_goal", "get_day_summary",
+        "get_progress", "delete_log_entry",
         "list_expenses", "get_expense_summary", "delete_expense",
         "list_events", "get_event", "find_free_time", "create_event", "update_event", "delete_event", "rsvp_event",
     }

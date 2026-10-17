@@ -48,7 +48,7 @@ REFUSE_REPLY = "Sorry, I can't help with that request."
 NOT_SUPPORTED_REPLY = (
     "I can't do that yet. Actions that change things for you need an approval "
     "step, and I don't have a tool for this one. I can read your email and "
-    "calendar, and manage your expenses."
+    "calendar, manage your expenses and reminders, and keep your fitness log."
 )
 
 PROMPT_SECTIONS: dict[str, str] = {
@@ -78,6 +78,22 @@ PROMPT_SECTIONS: dict[str, str] = {
         "'Call Ravi'. If no time was given, ask for it. Use list_reminders to show "
         "them and cancel_reminder (with the id from list_reminders) to cancel one. "
         "After creating one, confirm the exact local time you set."
+    ),
+    "fitness": (
+        "Use the fitness tools to log and review the user's food, workouts, weight and goal. "
+        "LOGGING MEALS: when the user says what they ate, call log_meal right away. Never ask "
+        "for calories: use the number they gave, otherwise ESTIMATE calories (and protein, "
+        "carbs, fat when you can) from typical portions and set estimated=true. Say plainly "
+        "that the numbers are estimates and that they can correct them (use update_meal with "
+        "the meal id; never delete and re-add). Several foods in one message are ONE meal "
+        "unless they are clearly different meals. Weight: pass the number as said; set unit "
+        "only if they named kg or lb. For 'how am I doing', 'what have I eaten today' or "
+        "'calories left', use get_day_summary or get_progress and report THEIR numbers and "
+        "notes; never do the arithmetic yourself and never invent data. Goals: use set_goal "
+        "for 'I want to cut/bulk/maintain'; do not invent calorie or protein targets, but you "
+        "may ask whether they want to set some. You are not a doctor: for medical conditions, "
+        "eating disorders, pregnancy or very low calorie targets, suggest a professional. "
+        "Deleting an entry needs the user's approval."
     ),
     "calendar": (
         "Use list_events and get_event to look at the user's Google Calendar. To show "

@@ -492,6 +492,49 @@ def run_checks(r: Runner, skip_llm: bool, include_disconnect: bool = False) -> N
         assert not [x for x in r.client.get("/reminders").json() if "smoketest-reminder" in x["text"]]
         return "created by chat, listed, cancelled"
 
+    def fitness_day() -> str:
+        res = r.client.get("/fitness/day")
+        assert res.status_code == 200, f"HTTP {res.status_code}: {res.text[:160]}"
+        body = res.json()
+        assert "calories" in body and "text" in body, body
+        return f"{body['calories']} kcal logged today"
+
+    def fitness_progress() -> str:
+        res = r.client.get("/fitness/progress", params={"days": 30})
+        assert res.status_code == 200, f"HTTP {res.status_code}: {res.text[:160]}"
+        assert "notes" in res.json()
+        return "ok"
+
+    def fitness_goal() -> str:
+        res = r.client.get("/fitness/goal")
+        assert res.status_code in (200, 404), f"HTTP {res.status_code}: {res.text[:160]}"
+        return "goal set" if res.status_code == 200 else "no goal yet (404 is normal)"
+
+    def fitness_validation() -> None:
+        assert r.client.get("/fitness/progress", params={"days": 0}).status_code == 422
+        assert r.client.get("/fitness/day", params={"on": "tomorrow-ish"}).status_code == 422
+
+    def fitness_meal_logged_as_estimate() -> str:
+        before = r.client.get("/fitness/day").json()["calories"]
+        body = r.chat("I had 2 boiled eggs and a slice of toast for breakfast")
+        assert_tools(body, "log_meal")
+        after = r.client.get("/fitness/day").json()
+        assert after["calories"] > before, f"calories did not go up: {before} -> {after['calories']}"
+        newest = max(after["meals"], key=lambda m: m["id"])
+        assert newest["estimated"] is True, "an estimate must be marked as estimated"
+        # clean up through the real approval flow (a human tap is the only way to delete)
+        cleanup = r.chat(f"Delete meal {newest['id']}")
+        proposals = [p for p in (cleanup.get("pending_approvals") or []) if p["tool"] == "delete_log_entry"]
+        assert proposals, f"cleanup: no delete proposal. {describe(cleanup)}"
+        res = r.client.post(f"/approvals/{proposals[0]['id']}/approve")
+        assert res.status_code == 200, f"cleanup approve -> HTTP {res.status_code}"
+        return f"+{after['calories'] - before} kcal logged as an estimate, then removed"
+
+    r.check("GET /fitness/day", fitness_day)
+    r.check("GET /fitness/progress", fitness_progress)
+    r.check("GET /fitness/goal", fitness_goal)
+    r.check("fitness: bad parameters are 422", fitness_validation)
+    r.check("fitness: a meal in plain words is logged as an estimate", fitness_meal_logged_as_estimate)
     r.check("GET /reminders", reminders_list)
     r.check("DELETE /reminders/{id}: unknown id is 404", reminders_cancel_unknown)
     r.check("reminder: created by chat, listed, cancelled", reminder_create_and_cancel)
