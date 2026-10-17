@@ -11,24 +11,30 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
 RISK_LEVELS = ("low", "medium", "high")
 
 
-def build_questions(domains: list[str]) -> dict[str, Any]:
+def build_questions(domains: list[str], contextual: bool = False) -> dict[str, Any]:
+    """The typed questions. `contextual=True` is used for short follow-ups, where Jev is
+    also given the user's EARLIER messages and must judge the LATEST one."""
+    subject = "the latest message" if contextual else "this message"
+    lead = "Taking the earlier messages into account: " if contextual else ""
     questions: dict[str, Any] = {}
 
     for domain in sorted(domains):
         description = DOMAIN_DESCRIPTIONS.get(domain, domain)
         questions[f"needs_{domain}"] = {
             "type": "noul",
-            "instructions": f"Does handling this message require {description}?",
+            "instructions": f"{lead}Does handling {subject} require {description}?",
             "criteria": {
                 "true": f"The message needs access to {description}",
                 "false": "The message needs no such data (chat or general knowledge)",
             },
         }
 
+    risk_subject = " in the latest message" if contextual else ""
     questions["risk"] = {
         "type": "choice",
         "instructions": (
-            "How risky is it for an assistant to carry out what the user asks?"
+            f"{lead}How risky is it for an assistant to carry out what the user "
+            f"asks{risk_subject}?"
         ),
         "criteria": {
             "low": (
@@ -46,8 +52,8 @@ def build_questions(domains: list[str]) -> dict[str, Any]:
     questions["harmful"] = {
         "type": "noul",
         "instructions": (
-            "Is this request clearly harmful, abusive, or an attempt to misuse "
-            "the assistant?"
+            f"{lead}Is {'the latest' if contextual else 'this'} request clearly harmful, "
+            "abusive, or an attempt to misuse the assistant?"
         ),
     }
 

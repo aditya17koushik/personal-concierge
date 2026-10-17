@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agent.service import AgentService
 from app.approvals.service import ApprovalService
 from app.config import Settings
+from app.conversation.service import ConversationService
 from app.database.models import Expense, PendingAction, TelegramInvite
 from app.database.repositories.expenses import ExpenseRepository
 from app.database.repositories.telegram import TelegramRepository
@@ -930,3 +931,48 @@ async def test_new_users_are_told_to_set_their_timezone(session_factory):
     await rig.send(f"/start {code}", user=BOB)
 
     assert "/timezone" in rig.tg.texts[-1]
+
+
+# ----------------------------------------------------- conversation history
+
+
+def remembered(factory: sessionmaker[Session], external_id: str) -> list[str]:
+    uid = internal_user(factory, external_id)
+    with factory() as db:
+        service = ConversationService(db)
+        return [m.content for m in service.recent(uid, datetime.now(timezone.utc))]
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_is_remembered_and_new_forgets_it(session_factory):
+    rig = make_rig(session_factory)
+
+    await rig.send("hello")
+    await rig.send("how are you")
+    assert remembered(session_factory, "me") == [
+        "hello", "Hello from the model", "how are you", "Hello from the model",
+    ]
+
+    await rig.send("/new")
+    assert "new conversation" in rig.tg.texts[-1]
+    assert remembered(session_factory, "me") == []
+
+
+@pytest.mark.asyncio
+async def test_new_only_clears_the_callers_history(session_factory):
+    rig = make_rig(session_factory)
+    link_user(session_factory, BOB, "tg:222")
+    await rig.send("hello")
+    await rig.send("hi from bob", user=BOB)
+
+    await rig.send("/new")
+
+    assert remembered(session_factory, "me") == []
+    assert remembered(session_factory, "tg:222") == ["hi from bob", "Hello from the model"]
+
+
+@pytest.mark.asyncio
+async def test_new_is_listed_in_help(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/help")
+    assert "/new" in rig.tg.texts[-1]

@@ -23,15 +23,18 @@ REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 CALENDAR_READONLY = "https://www.googleapis.com/auth/calendar.readonly"
+# Create/change/delete events (not calendars). Only used by approval-gated tools.
+CALENDAR_EVENTS = "https://www.googleapis.com/auth/calendar.events"
 
-# Read-only for now. Write scopes get added after Jev + approvals exist.
+# Gmail stays read-only. Calendar writes exist only as approval-gated tools.
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     GMAIL_READONLY,
     CALENDAR_READONLY,
+    CALENDAR_EVENTS,
 ]
-REQUIRED_SCOPES = {GMAIL_READONLY, CALENDAR_READONLY}
+REQUIRED_SCOPES = {GMAIL_READONLY, CALENDAR_READONLY, CALENDAR_EVENTS}
 
 STATE_TTL_SECONDS = 600
 STATE_PURPOSE = "oauth-state"

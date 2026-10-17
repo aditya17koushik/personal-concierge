@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.agent.service import AgentService
 from app.approvals.service import ApprovalError, ApprovalService
 from app.config import Settings
+from app.conversation.service import ConversationService
 from app.integrations.google.links import LoginLinkService
 from app.integrations.telegram.client import TelegramAPI, TelegramError
 from app.llm.base import LLMError
@@ -38,6 +39,7 @@ HELP_TEXT = (
     "- Any unread emails from my bank?\n"
     "- What's on my calendar tomorrow?\n\n"
     "Commands:\n"
+    "/new - start a fresh conversation (I forget the recent messages)\n"
     "/approvals - changes waiting for your approval\n"
     "/google - connect your Google account\n"
     "/profile - your timezone, currency and units\n"
@@ -267,6 +269,9 @@ class TelegramHandler:
     ) -> None:
         if command in ("/start", "/help"):
             await self._send(chat_id, HELP_TEXT + (ADMIN_HELP if link.is_admin else ""))
+        elif command == "/new":
+            await self._db(lambda db: ConversationService(db).clear(link.user_id))
+            await self._send(chat_id, "Started a new conversation. I've forgotten the recent messages.")
         elif command == "/approvals":
             await self._list_approvals(link, chat_id)
         elif command == "/google":

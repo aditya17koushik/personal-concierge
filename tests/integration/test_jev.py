@@ -153,7 +153,7 @@ def test_multiple_intents_combine_tools():
         build_default_registry(),
     )
     assert set(decision.allowed_tools) == {
-        "search_emails", "read_email", "list_events", "get_event",
+        "search_emails", "read_email", "list_events", "get_event", "find_free_time",
     }
 
 
@@ -247,8 +247,20 @@ def test_high_risk_with_no_domain_offers_gated_tools_as_proposals():
     )
     assert decision.action == "needs_approval"
     assert decision.intents == ["general"]
-    assert decision.blocked_tools == ["delete_expense"]
-    assert set(decision.allowed_tools) == {"list_expenses", "get_expense_summary"}
+    assert set(decision.blocked_tools) == {"delete_expense", "create_event", "update_event", "delete_event", "rsvp_event"}
+    assert set(decision.allowed_tools) == {
+        "list_expenses", "get_expense_summary", "list_events", "get_event", "find_free_time",
+    }
+
+
+def test_calendar_writes_are_gated_and_reads_are_not():
+    decision = apply_policy(
+        output(intents=["calendar"], action="use_tools", risk="high"),
+        build_default_registry(),
+    )
+    assert decision.action == "needs_approval"
+    assert set(decision.blocked_tools) == {"create_event", "update_event", "delete_event", "rsvp_event"}
+    assert set(decision.allowed_tools) == {"list_events", "get_event", "find_free_time"}
 
 
 def test_high_risk_in_a_domain_with_no_gated_tool_stays_declined():
@@ -415,8 +427,15 @@ def test_default_thresholds_on_real_jev_scores(
     if action == "use_tools":
         assert decision.allowed_tools  # read tools offered, not withheld
     elif decision.blocked_tools:  # approval-gated tool exists: read-only lookups only
-        assert decision.blocked_tools == ["delete_expense"]
-        assert set(decision.allowed_tools) == {"list_expenses", "get_expense_summary"}
+        gated = {
+            "expense": {"delete_expense"},
+            "calendar": {"create_event", "update_event", "delete_event", "rsvp_event"},
+        }
+        assert set(decision.blocked_tools) == set().union(*(gated[i] for i in intents if i in gated)) or intents == ["general"]
+        assert decision.allowed_tools and all(
+            t in {"list_expenses", "get_expense_summary", "list_events", "get_event", "find_free_time"}
+            for t in decision.allowed_tools
+        )
     else:
         assert decision.allowed_tools == []
 
@@ -682,6 +701,7 @@ async def test_high_risk_with_no_domain_goes_to_propose_mode_not_a_dead_end(db: 
     assert len(provider.calls) == 1  # the model decided, not a canned refusal
     assert provider.calls[0].tool_names == {
         "list_expenses", "get_expense_summary", "delete_expense",
+        "list_events", "get_event", "find_free_time", "create_event", "update_event", "delete_event", "rsvp_event",
     }
 
 

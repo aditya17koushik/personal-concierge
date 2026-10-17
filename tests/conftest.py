@@ -48,7 +48,9 @@ class PassthroughJev:
     """Test stand-in for Jev: allows every tool and skips the classification
     LLM call, so tests of tools/agent flow keep their scripted LLM sequences."""
 
-    async def decide(self, message: str, registry: ToolRegistry) -> Decision:
+    async def decide(
+        self, message: str, registry: ToolRegistry, context: list[str] | None = None
+    ) -> Decision:
         return Decision(
             intents=sorted(registry.domains()),
             action="use_tools",

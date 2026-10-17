@@ -15,6 +15,7 @@ from app.database.repositories.google_credentials import GoogleCredentialReposit
 from app.database.repositories.users import UserRepository
 from app.integrations.google.links import LoginLinkService
 from app.integrations.google.oauth import (
+    CALENDAR_EVENTS,
     CALENDAR_READONLY,
     GMAIL_READONLY,
     TOKEN_URL,
@@ -26,7 +27,7 @@ from app.integrations.google.oauth import (
 from app.main import app
 from app.security.crypto import decrypt
 
-FULL_SCOPE = f"openid email {GMAIL_READONLY} {CALENDAR_READONLY}"
+FULL_SCOPE = f"openid email {GMAIL_READONLY} {CALENDAR_READONLY} {CALENDAR_EVENTS}"
 
 
 def make_handler(
@@ -302,7 +303,9 @@ def test_the_login_link_binds_google_to_the_link_owner(db: Session):
     from app.database.models import User
 
     cred = db.query(GoogleCredential).one()
-    assert db.get(User, cred.user_id).external_id == "bob"
+    owner = db.get(User, cred.user_id)
+    assert owner is not None
+    assert owner.external_id == "bob"
 
 
 def test_creating_a_link_requires_a_token_and_returns_a_working_url(db: Session):

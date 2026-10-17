@@ -14,8 +14,20 @@ from app.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+def format_state(message: str, context: list[str]) -> str:
+    """Jev's input for a follow-up: the user's EARLIER messages, then the latest.
+    Only the user's own words go in, never assistant replies (which can quote email)."""
+    earlier = "\n".join(f"{i}. {text}" for i, text in enumerate(context, start=1))
+    return (
+        f"Earlier messages from the user (oldest first):\n{earlier}\n\n"
+        f"Latest message from the user:\n{message}"
+    )
+
+
 class Decider(Protocol):
-    async def decide(self, message: str, registry: ToolRegistry) -> Decision: ...
+    async def decide(
+        self, message: str, registry: ToolRegistry, context: list[str] | None = None
+    ) -> Decision: ...
 
 
 class Evaluator(Protocol):
@@ -37,11 +49,19 @@ class Jev:
         self._evaluator = evaluator
         self._thresholds = thresholds or Thresholds()
 
-    async def decide(self, message: str, registry: ToolRegistry) -> Decision:
+    async def decide(
+        self, message: str, registry: ToolRegistry, context: list[str] | None = None
+    ) -> Decision:
         domains = sorted(registry.domains())
+        contextual = bool(context)
+        state = format_state(message, context) if context else message
         try:
-            data = await self._evaluator.evaluate(message, build_questions(domains))
+            data = await self._evaluator.evaluate(
+                state, build_questions(domains, contextual=contextual)
+            )
             output = interpret(data["answers"], domains, self._thresholds)
+            if contextual:
+                output.reason += " (follow-up, with context)"
         except TypeSafeError:
             logger.warning("Jev (TypeSafe) unavailable; using safe fallback")
             return fallback_decision(registry, "jev_unavailable")
@@ -56,7 +76,9 @@ class FallbackOnlyDecider:
     """Used when no TypeSafe API key is configured: always the safe fallback
     (plain chat plus read-only tools)."""
 
-    async def decide(self, message: str, registry: ToolRegistry) -> Decision:
+    async def decide(
+        self, message: str, registry: ToolRegistry, context: list[str] | None = None
+    ) -> Decision:
         return fallback_decision(registry, "jev_not_configured")
 
 

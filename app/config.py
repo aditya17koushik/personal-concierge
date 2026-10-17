@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     daily_message_limit: int = 200  # per user per local day; 0 disables
     google_login_link_ttl_minutes: int = 10
 
+    # Conversation history (what the model remembers within a conversation)
+    history_ttl_minutes: int = 360  # older messages are not shown to the model
+    history_max_messages: int = 12  # 0 disables history entirely
+    history_max_chars: int = 6000  # rough budget (about 1,500 tokens)
+    history_retention_days: int = 7  # older rows are deleted
+
     # Expenses
     default_currency: str = "INR"
 

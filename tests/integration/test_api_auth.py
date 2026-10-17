@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.admin.__main__ import create_token, revoke_token
 from app.agent.service import AgentService
-from app.api.agent import get_agent_service
+from app.api.agent import get_agent_service, get_conversation_service
 from app.api.approvals import get_approval_service
 from app.approvals.service import ApprovalService
+from app.conversation.service import ConversationService
 from app.database.models import ApiToken
 from app.database.repositories.api_tokens import ApiTokenRepository
 from app.database.repositories.expenses import ExpenseRepository
@@ -26,6 +27,18 @@ from app.tools.base import ToolContext
 from app.tools.registry import build_default_registry
 
 TODAY = date(2026, 10, 9)
+
+
+def user_id_of(db: Session, external_id: str) -> int:
+    user = UserRepository(db).get(external_id)
+    assert user is not None
+    return user.id
+
+
+def last_used(db: Session) -> datetime:
+    stamp = db.query(ApiToken).one().last_used_at
+    assert stamp is not None
+    return stamp.replace(tzinfo=timezone.utc)
 
 
 class FakeProvider(LLMProvider):
@@ -54,6 +67,7 @@ def client(db: Session, passthrough_jev) -> Iterator[TestClient]:
     app.dependency_overrides[get_approval_service] = lambda: ApprovalService(
         db, build_default_registry(), today_fn=lambda: TODAY
     )
+    app.dependency_overrides[get_conversation_service] = lambda: ConversationService(db)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -86,11 +100,11 @@ def test_last_used_is_not_written_on_every_request(db: Session):
     repo.authenticate(hash_token(token), t0)
     repo.authenticate(hash_token(token), t0 + timedelta(seconds=30))
     db.expire_all()
-    assert db.query(ApiToken).one().last_used_at.replace(tzinfo=timezone.utc) == t0
+    assert last_used(db) == t0
 
     repo.authenticate(hash_token(token), t0 + timedelta(minutes=5))
     db.expire_all()
-    assert db.query(ApiToken).one().last_used_at.replace(tzinfo=timezone.utc) == t0 + timedelta(minutes=5)
+    assert last_used(db) == t0 + timedelta(minutes=5)
 
 
 # ------------------------------------------------------------------ the gate
@@ -121,6 +135,7 @@ def test_protected_endpoints_reject_missing_or_bad_tokens(
         client.get("/auth/google/status", headers=headers),
         client.delete("/auth/google", headers=headers),
         client.post("/auth/google/link", headers=headers),
+        client.delete("/agent/history", headers=headers),
     ]
     for response in calls:
         assert response.status_code == 401
@@ -160,7 +175,7 @@ async def test_one_user_cannot_see_or_decide_anothers_approvals(
 ):
     alice_token = create_token(db, "alice", "a")
     bob_token = create_token(db, "bob", "b")
-    alice_id = UserRepository(db).get("alice").id
+    alice_id = user_id_of(db, "alice")
     expense = ExpenseRepository(db).add(
         user_id=alice_id, amount=Decimal("5.00"), currency="INR",
         category="food", description=None, spent_on=TODAY,
@@ -202,3 +217,22 @@ def test_the_daily_limit_returns_429_with_retry_after(db: Session, client: TestC
 
     other = create_token(db, "bob", "test")  # limits are per user
     assert client.post("/agent/chat", json={"message": "hi"}, headers=bearer(other)).status_code == 200
+
+
+def test_history_can_be_cleared_by_its_owner_only(db: Session, client: TestClient):
+    alice_token = create_token(db, "alice", "a")
+    bob_token = create_token(db, "bob", "b")
+    alice_id = user_id_of(db, "alice")
+    bob_id = user_id_of(db, "bob")
+    now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+    service = ConversationService(db)
+    service.add_turn(alice_id, "alice q", "alice a", False, now)
+    service.add_turn(bob_id, "bob q", "bob a", False, now)
+
+    res = client.delete("/agent/history", headers=bearer(alice_token))
+
+    assert res.status_code == 200 and res.json() == {"deleted": 2}
+    assert service.recent(alice_id, now) == []
+    assert len(service.recent(bob_id, now)) == 2  # untouched
+    assert client.delete("/agent/history", headers=bearer(bob_token)).json() == {"deleted": 2}
+    assert client.delete("/agent/history", headers=bearer(bob_token)).json() == {"deleted": 0}

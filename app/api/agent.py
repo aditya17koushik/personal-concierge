@@ -5,6 +5,7 @@ from app.agent.factory import build_agent_service
 from app.agent.service import AgentService
 from app.api.deps import CurrentUser, get_current_user
 from app.config import get_settings
+from app.conversation.service import ConversationService
 from app.database.session import get_db
 from app.schemas.agent import ChatRequest, ChatResponse
 from app.usage.service import RateLimitExceeded
@@ -30,3 +31,23 @@ async def chat(
             detail=f"Daily limit of {exc.limit} messages reached.",
             headers={"Retry-After": str(exc.retry_after_seconds)},
         )
+
+
+def get_conversation_service(db: Session = Depends(get_db)) -> ConversationService:
+    settings = get_settings()
+    return ConversationService(
+        db,
+        ttl_minutes=settings.history_ttl_minutes,
+        max_messages=settings.history_max_messages,
+        max_chars=settings.history_max_chars,
+        retention_days=settings.history_retention_days,
+    )
+
+
+@router.delete("/history")
+def clear_history(
+    current: CurrentUser = Depends(get_current_user),
+    service: ConversationService = Depends(get_conversation_service),
+) -> dict[str, int]:
+    """Forget this conversation: deletes your stored messages."""
+    return {"deleted": service.clear(current.user_id)}

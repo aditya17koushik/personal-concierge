@@ -204,9 +204,9 @@ class CountingJev:
         self.inner = inner
         self.calls = 0
 
-    async def decide(self, message: str, registry: Any) -> Any:
+    async def decide(self, message: str, registry: Any, context: Any = None) -> Any:
         self.calls += 1
-        return await self.inner.decide(message, registry)
+        return await self.inner.decide(message, registry, context)
 
 
 @pytest.mark.asyncio

@@ -455,6 +455,24 @@ def run_checks(r: Runner, skip_llm: bool, include_disconnect: bool = False) -> N
         body = r.chat("Look up my next calendar event over the next 30 days and give me its details")
         assert_tools(body, "list_events")
 
+    def calendar_free_time() -> None:
+        need_google()
+        assert_tools(r.chat("When am I free for a 30 minute call this week?"), "find_free_time")
+
+    def calendar_create_is_gated() -> str:
+        need_google()
+        body = r.chat("Schedule an event called smoketest-event tomorrow at 10:00 for 30 minutes")
+        assert "create_event" not in body["tools_used"], "event was created without approval!"
+        pending = body.get("pending_approvals") or []
+        assert pending, f"no approval was proposed. {describe(body)}"
+        assert pending[0]["tool"] == "create_event", pending[0]
+        approval_id = str(pending[0]["id"])
+        res = r.client.post(f"/approvals/{approval_id}/reject")  # never actually create it
+        assert res.status_code == 200, f"reject -> HTTP {res.status_code}"
+        return pending[0].get("summary", "proposed, then rejected")
+
+    r.check("calendar: free time", calendar_free_time)
+    r.check("calendar: create event is proposed, never run (rejected)", calendar_create_is_gated)
     r.check("calendar: list events", calendar_list)
     r.check("calendar: event details", calendar_details)
     r.check("gmail: search emails", gmail_search)

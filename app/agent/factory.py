@@ -24,6 +24,7 @@ def build_approval_service(
         ttl_minutes=settings.approval_ttl_minutes,
         google_oauth=google_oauth or GoogleOAuthService(db, settings),
         default_currency=settings.default_currency,
+        default_timezone=settings.default_timezone,
     )
 
 
@@ -36,6 +37,12 @@ def build_agent_service(db: Session, settings: Settings) -> AgentService:
         jev=build_jev(settings),
         registry=registry,
         default_currency=settings.default_currency,
+        default_timezone=settings.default_timezone,
+        daily_message_limit=settings.daily_message_limit,
+        history_ttl_minutes=settings.history_ttl_minutes,
+        history_max_messages=settings.history_max_messages,
+        history_max_chars=settings.history_max_chars,
+        history_retention_days=settings.history_retention_days,
         google_oauth=google,
         approvals=build_approval_service(db, settings, registry, google),
     )

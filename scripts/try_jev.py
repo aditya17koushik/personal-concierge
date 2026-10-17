@@ -6,10 +6,13 @@ Useful for checking your API key and for tuning the thresholds in .env
 
     python scripts/try_jev.py                       # built-in sample messages
     python scripts/try_jev.py "Move my 3pm meeting"  # your own messages
+    python scripts/try_jev.py "250" --context "I bought something"
+        # a follow-up: judge "250" given the user's earlier messages (repeat --context)
 
 Run from the project root. Reads TYPESAFE_API_KEY etc. from .env.
 """
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
@@ -18,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import get_settings  # noqa: E402
 from app.decisions.interpret import Thresholds, interpret  # noqa: E402
+from app.decisions.jev import format_state  # noqa: E402
 from app.decisions.policy import apply_policy  # noqa: E402
 from app.decisions.questions import build_questions  # noqa: E402
 from app.integrations.typesafe.client import TypeSafeClient, TypeSafeError  # noqa: E402
@@ -38,7 +42,7 @@ SAMPLES = [
 ]
 
 
-async def main(messages: list[str]) -> int:
+async def main(messages: list[str], context: list[str]) -> int:
     settings = get_settings()
     if not settings.typesafe_api_key:
         print("TYPESAFE_API_KEY is not set in .env")
@@ -57,12 +61,13 @@ async def main(messages: list[str]) -> int:
     )
     registry = build_default_registry()
     domains = sorted(registry.domains())
-    questions = build_questions(domains)
+    questions = build_questions(domains, contextual=bool(context))
 
     print(f"model={settings.jev_model}  thresholds={thresholds}\n")
     for message in messages:
         try:
-            data = await client.evaluate(message, questions)
+            state = format_state(message, context) if context else message
+            data = await client.evaluate(state, questions)
             decision = apply_policy(interpret(data["answers"], domains, thresholds), registry)
         except TypeSafeError as exc:
             print(f"{message!r}\n   ERROR: {exc}\n")
@@ -77,4 +82,11 @@ async def main(messages: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main(sys.argv[1:] or SAMPLES)))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("messages", nargs="*")
+    parser.add_argument(
+        "--context", action="append", default=[],
+        help="an EARLIER user message (repeatable) to judge the message as a follow-up",
+    )
+    parsed = parser.parse_args()
+    sys.exit(asyncio.run(main(parsed.messages or SAMPLES, parsed.context)))
