@@ -414,3 +414,112 @@ class FitnessGoal(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class CoachSettings(Base):
+    """Opt-in coaching messages: an evening check-in, and a weekly review on one weekday."""
+
+    __tablename__ = "coach_settings"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    checkin_time: Mapped[str] = mapped_column(
+        String(5), default="20:00", server_default="20:00"
+    )  # HH:MM in the user's timezone
+    weekly_day: Mapped[int] = mapped_column(
+        Integer, default=6, server_default="6"
+    )  # 0 = Monday ... 6 = Sunday; that day's message is the weekly review
+    last_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class FitnessProfile(Base):
+    """What the user told us about themselves. Weight lives in body_weights, the goal in fitness_goals."""
+
+    __tablename__ = "fitness_profiles"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    age_set_on: Mapped[date | None] = mapped_column(Date, nullable=True)  # age grows from here
+    sex: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    height_cm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    activity_level: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    experience: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    muscle_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    conditions: Mapped[str | None] = mapped_column(String(500), nullable=True)  # 'none' is an answer
+    preferred_workouts: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    days_per_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    equipment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    diet_pref: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    allergies: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cuisine: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class FitnessPlan(Base):
+    """A 7-day workout plan and 7-day meal plan. Versioned: one is active, older ones are kept."""
+
+    __tablename__ = "fitness_plans"
+    __table_args__ = (UniqueConstraint("user_id", "version", name="uq_plan_user_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(10), index=True)  # active | archived
+    workout: Mapped[dict[str, Any]] = mapped_column(JSON)
+    meals: Mapped[dict[str, Any]] = mapped_column(JSON)
+    targets: Mapped[dict[str, Any]] = mapped_column(JSON)  # calories, macros, bmr, tdee, mode
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSON)  # what it was built from (stats, days)
+    reason: Mapped[str] = mapped_column(String(300))  # 'first plan' or why it was changed
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+class TrackingSettings(Base):
+    """Opt-in nudges when a planned meal or workout has not been logged."""
+
+    __tablename__ = "tracking_settings"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    breakfast_time: Mapped[str] = mapped_column(String(5), default="10:00", server_default="10:00")
+    lunch_time: Mapped[str] = mapped_column(String(5), default="14:30", server_default="14:30")
+    dinner_time: Mapped[str] = mapped_column(String(5), default="21:00", server_default="21:00")
+    workout_time: Mapped[str] = mapped_column(String(5), default="19:30", server_default="19:30")
+
+
+class TrackingEvent(Base):
+    """One row per user, day and slot. 'nudged' = reminder sent (inserting it IS the claim, so a
+    second worker cannot double-send); 'skipped' = the user said they skipped it or rest today."""
+
+    __tablename__ = "tracking_events"
+    __table_args__ = (UniqueConstraint("user_id", "day", "slot", name="uq_tracking_user_day_slot"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    slot: Mapped[str] = mapped_column(String(10))  # breakfast|lunch|dinner|workout
+    kind: Mapped[str] = mapped_column(String(8))  # nudged|skipped

@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 from app.approvals.service import ApprovalService
 from app.conversation.service import ConversationService, HistoryMessage
 from app.database.repositories.users import UserRepository
+from app.fitness.context import build_fitness_context
 from app.decisions.jev import Decider
 from app.decisions.schemas import Decision
 from app.integrations.google.oauth import GoogleOAuthService
-from app.llm.base import LLMProvider
+from app.llm.base import LLMError, LLMProvider
 from app.profiles.service import (
     ProfileData,
     ProfileService,
@@ -29,7 +30,7 @@ from app.tools.registry import ToolRegistry, build_default_registry
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 8  # an intake plus plan creation needs several sequential tool calls
 
 # A short message that Jev reads as plain chat may really be a follow-up ("250",
 # "yes, that one"). For those, Jev gets a second look WITH the user's earlier words.
@@ -87,13 +88,43 @@ PROMPT_SECTIONS: dict[str, str] = {
         "that the numbers are estimates and that they can correct them (use update_meal with "
         "the meal id; never delete and re-add). Several foods in one message are ONE meal "
         "unless they are clearly different meals. Weight: pass the number as said; set unit "
-        "only if they named kg or lb. For 'how am I doing', 'what have I eaten today' or "
-        "'calories left', use get_day_summary or get_progress and report THEIR numbers and "
+        "only if they named kg or lb. For 'what have I eaten today', 'calories left' or "
+        "'show my progress', use get_day_summary or get_progress and report THEIR numbers and "
         "notes; never do the arithmetic yourself and never invent data. Goals: use set_goal "
-        "for 'I want to cut/bulk/maintain'; do not invent calorie or protein targets, but you "
-        "may ask whether they want to set some. You are not a doctor: for medical conditions, "
+        "for 'I want to cut/bulk/maintain' and for changing a target (only pass what the user "
+        "changed; the rest is kept); do not invent calorie or protein targets, but you "
+        "may ask whether they want to set some. COACHING: for 'how am I doing', 'what should I "
+        "improve', 'am I eating enough / too much / overtraining', 'push me' or 'motivate me', "
+        "call get_coaching and answer from its flags. Start with what is going well, then the "
+        "most important problem, then one or two concrete actions. Be direct, warm and "
+        "motivating, not preachy, and use ONLY the numbers in the tool result; never invent "
+        "numbers or diagnose. If it says safety is true, do not tell the user to eat less or "
+        "train more: recommend a doctor or dietitian. If there is too little data, say what "
+        "to log to get better advice. You are not a doctor: for medical conditions, "
         "eating disorders, pregnancy or very low calorie targets, suggest a professional. "
-        "Deleting an entry needs the user's approval."
+        "Deleting an entry needs the user's approval. "
+        "INTAKE AND PLANS: when the user wants a plan, a BMR, targets, 'get me fit', or says "
+        "they are starting: call get_fitness_profile and ask ONLY for the items in ask_for, at "
+        "most three or four per message, in plain words (units as they like; convert yourself). "
+        "Save every answer right away with save_fitness_profile. If weight or goal is missing, "
+        "log the weight with log_weight and set the goal with set_goal. When nothing required is "
+        "missing, call calculate_targets and tell the user their BMR, maintenance calories and "
+        "daily calorie and protein targets exactly as returned, and the health notes. If "
+        "status is refuse, give no numbers, say why kindly and recommend a doctor or dietitian. "
+        "Then call create_plan (it takes up to a minute) and present the result briefly: the "
+        "training days, a sample day, and that /plan shows today and /plan week the full week. "
+        "Create the first plan only once; change it with update_plan ONLY when the user asks "
+        "(or agrees after you suggest it because of the plan_update_suggested flag), and "
+        "explain what_changed. Map the user's words to the allowed values yourself (5 years of "
+        "training = advanced, a mix of veg and non-veg = non_vegetarian) and save ALL answers in "
+        "ONE save_fitness_profile call; call independent tools together in the same step. Use "
+        "the FITNESS MEMORY block (if present) in every fitness "
+        "answer: respect the conditions, allergies, diet and equipment in it, compare what "
+        "they log with today's plan and targets, and never contradict the saved plan. Say "
+        "this is general guidance, not medical advice. TRACKING REMINDERS: when the user says they "
+        "skipped a meal or that today is a rest day, call skip_tracking and acknowledge briefly "
+        "without scolding. For turning reminders on or off, or changing their times, use "
+        "set_tracking_reminders. Reminders are sent by the app on its own."
     ),
     "calendar": (
         "Use list_events and get_event to look at the user's Google Calendar. To show "
@@ -175,6 +206,7 @@ def build_system_prompt(
     timezone_name: str | None = None,
     history_has_external: bool = False,
     now_local: datetime | None = None,
+    fitness_context: str | None = None,
 ) -> str:
     where = f" (the user's timezone is {timezone_name})" if timezone_name else ""
     clock = f" The time now is {now_local.strftime('%H:%M')} there." if now_local else ""
@@ -199,6 +231,9 @@ def build_system_prompt(
         lines += [PROPOSE_SECTIONS[d] for d in domains if d in PROPOSE_SECTIONS]
     else:
         lines.append(NO_TOOLS_RULE)
+
+    if fitness_context and "fitness" in decision.intents:
+        lines.append(fitness_context)
 
     uses_external = decision.action in ("use_tools", "needs_approval") and (
         "email" in domains or "calendar" in domains
@@ -325,6 +360,7 @@ class AgentService:
             google_oauth=self._google_oauth,
             timezone=profile.timezone,
             now=now,
+            llm=self._llm,
         )
 
         response = await self._converse(user_id, message, ctx, profile, today, history)
@@ -389,6 +425,12 @@ class AgentService:
             proposable = hybrid_proposals(decision, self._registry)
         tools = self._registry.schemas(allowed | proposable) if use_tools else None
 
+        fitness_context: str | None = None
+        if "fitness" in decision.intents:
+            fitness_context = await asyncio.to_thread(
+                build_fitness_context, self._db, ctx.user_id, today
+            )
+
         messages = [
             Message(
                 role="system",
@@ -399,6 +441,7 @@ class AgentService:
                     profile.timezone,
                     history_has_external=any(m.external for m in history),
                     now_local=ctx.now.astimezone(ZoneInfo(profile.timezone)),
+                    fitness_context=fitness_context,
                 ),
             ),
             *[
@@ -459,4 +502,12 @@ class AgentService:
                 )
 
         logger.warning("tool loop hit MAX_TOOL_ROUNDS for user_id=%s", user_id)
+        if tools_used:
+            # Work was done: let the model report it (no tools) instead of a blank failure.
+            try:
+                final = await self._llm.chat(messages, tools=None)
+            except LLMError:
+                final = None
+            if final is not None and final.content:
+                return self._response(final.content, final.model, decision, tools_used, proposals)
         return self._response(FALLBACK_REPLY, last_model, decision, tools_used, proposals)

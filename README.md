@@ -164,6 +164,8 @@ default `me`), so your expenses and Google connection carry over. Others join wi
 | `/google` | linked users | Single-use Google login link |
 | `/profile`, `/timezone`, `/currency`, `/units` | linked users | View or change your profile |
 | `/today`, `/progress [days]`, `/goal` | linked users | Fitness day summary, trend and goal (no model involved) |
+| `/review` | linked users | Your coach's review of the last 7 days (no model involved) |
+| `/coach on 20:00`, `/coach off`, `/coach weekly sunday` | linked users | Evening check-ins and a weekly review |
 | `/reminders`, `/reminders cancel <id>` | linked users | List or cancel pending reminders |
 | `/agenda on 08:00`, `/agenda off` | linked users | Daily morning summary |
 | `/meetings 15`, `/meetings off` | linked users | Alert N minutes before meetings |
@@ -195,10 +197,86 @@ How it behaves:
 - This is not medical advice. Dieting tips for medical conditions, pregnancy or eating disorders are left to professionals.
 
 Read-only API: `GET /fitness/day?on=YYYY-MM-DD`, `GET /fitness/progress?days=30`, `GET /fitness/goal`.
-Telegram: `/today` (or `/today yesterday`), `/progress 7`, `/goal`.
+Telegram: `/plan`, `/tracking`, `/today` (or `/today yesterday`), `/progress 7`, `/goal`.
 
 After pulling this phase: `alembic revision --autogenerate -m "add fitness tables"`, check that the file
 only creates `meals`, `workouts`, `body_weights` and `fitness_goals`, then `alembic upgrade head`.
+
+## Coach
+
+The coach watches what you log and tells you what to fix. **The verdicts are computed in code**
+(`app/coach/rules.py`); the model only words them. Ask "how am I doing", "am I eating enough",
+"am I overtraining" or "push me", or turn on messages with `/coach on 20:00`.
+
+What it checks (last 7 days, weight over 28 days). A flag is `good`, `info`, `warn` or `alert`:
+
+| Flag | When |
+| --- | --- |
+| `under_eating` / `over_eating` | Average calories on logged days vs your target. Cut and maintain: under 75% / over 110%. Bulk: under 90% / over 120% |
+| `low_protein` | Protein under 80% of target (only when every meal has a protein number) |
+| `training_streak`, `high_training_load` | 6+ days in a row, a full week with no rest, 8+ sessions or 10+ hours in a week |
+| `under_training` | Fewer sessions than your weekly target minus one (after your goal is a week old) |
+| `recovery_risk` | Heavy training together with under-eating |
+| `weight_on_track`, `cut_stalled`, `weight_wrong_way`, `losing_too_fast`, `bulking_too_fast`, `weight_drifting` | Weekly weight change against your goal; needs two weigh-ins a week apart |
+| `nothing_logged_today`, `calories_short_today`, `calories_over_today`, `protein_gap_today` | Same-day checks in the evening check-in only |
+| `bulk_stalled`, `plan_update_suggested` | Bulk not moving; plan 14+ days old and progress calls for a change |
+| `no_goal`, `no_calorie_target`, `sparse_logging`, `weigh_in_stale` | Missing data that limits the advice |
+
+Safety rule: if your logged intake averages under 1200 kcal a day, the coach raises `very_low_intake`
+and **stops pushing**: no "eat less", no "train more", only a suggestion to see a doctor or dietitian (or to log
+everything if you simply forget). It also needs at least 3 logged days before judging intake, so a
+few missed logs do not cause false alarms.
+
+Messages (opt-in, `/coach on [HH:MM]`, default 20:00 in your timezone):
+- **Evening check-in**: today against your targets, plus what to fix tonight.
+- **Weekly review** on the chosen weekday (default Sunday) instead of that day's check-in: weight trend, food, training, "Going well", "Fix first".
+- One coach message a day at most, sent once (atomic claim), retried if Telegram fails, only within `COACH_WINDOW_HOURS` of the chosen time.
+- `/review` shows the weekly review any time. None of these messages call the model.
+
+Setting a goal now updates instead of replacing: "set my calories to 2000" keeps your mode, protein and workout targets.
+
+After pulling this phase: `alembic revision --autogenerate -m "add coach settings"`, check that it only creates
+`coach_settings`, then `alembic upgrade head`. The scheduler runs inside `python -m app.telegram`.
+
+## Personal plan: intake, targets, 7-day plans, memory, tracking nudges
+
+Say "I want to get fit" or "make me a plan" and the assistant runs an intake, then builds your plan.
+
+1. **Intake.** It asks (a few questions at a time) for age, sex, height, weight, activity level, training
+   experience, health conditions or injuries ("none" is a valid answer), training days per week,
+   equipment (gym, home dumbbells, home minimal, none), diet (vegetarian, eggetarian, non-vegetarian, vegan)
+   and your goal. Optional: muscle level, preferred workouts, session length, allergies, cuisine.
+   Answers are saved (`fitness_profiles`) and merged, so it never asks twice.
+2. **Targets, in code** (`app/fitness/targets.py`): BMR (Mifflin-St Jeor), maintenance = BMR x activity,
+   calories for your goal (cut: at most 20% below and never under a safe floor; bulk: a modest surplus),
+   protein, fat and carbs.
+3. **Health screen.** Under 18, eating disorders and pregnancy get **no numbers and no plan**, only a
+   suggestion to see a professional. Diabetes/thyroid/heart/kidney-type conditions, 65+, BMI 40+ and
+   underweight users get conservative targets (an underweight "cut" becomes maintenance); injuries
+   restrict exercises and may recommend medical clearance.
+4. **Plan** (`fitness_plans`, versioned; one active). The model writes the exercises and foods; **code
+   enforces** exact training days, rest days, equipment, injury restrictions, diet type, allergens and that every day is
+   within 10% of the calorie target with at least 85% of the protein. A plan that breaks a rule is rejected and
+   regenerated (3 tries). The first plan switches on tracking reminders. `/plan` shows today, `/plan week` the week.
+5. **Memory.** Every fitness conversation gets a "FITNESS MEMORY" block (profile, health conditions, allergies,
+   targets, plan version, today's planned workout and meals, top coach flags). It is built by code, flattened,
+   size-capped and labelled as data. Logged meals and workouts are judged against the plan's targets (the plan sets your goal's
+   calories, protein and weekly workouts).
+6. **Adapting.** The plan changes only when you ask ("update my plan"). Rules (from the coach's flags, only
+   when the plan is at least 7 days old): stalled cut -125 kcal, weight rising on a cut -150, weight falling on a bulk
+   +200, stalled bulk +150, losing too fast +150, gaining too fast -150, too much training or missed sessions one fewer training day.
+   If you are over-eating, behaviour is fixed first, not the numbers. If your logged intake is very low nothing is changed.
+   After 14 days the coach adds `plan_update_suggested` when your progress calls for it.
+7. **Tracking nudges** (`/tracking on|off`, `/tracking lunch 13:30`). If a meal is not logged within the window after
+   breakfast 10:00, lunch 14:30 or dinner 21:00, or the planned workout (19:30, training days only) is not logged, you
+   get one message. Reply "skipped lunch" or "rest today" and it stops for that day. Each nudge is claimed atomically
+   (never double-sent) and retried if Telegram fails. Config: `TRACKING_WINDOW_HOURS` (default 2).
+
+This is general guidance, not medical advice.
+
+After pulling this phase: `alembic revision --autogenerate -m "add fitness profile plans and tracking"`, check that it
+only creates `fitness_profiles`, `fitness_plans`, `tracking_settings` and `tracking_events` (plus `meals`, `workouts`,
+`body_weights`, `fitness_goals`, `coach_settings` if you have not applied those yet), then `alembic upgrade head`.
 
 ## Reminders and scheduler
 
@@ -366,6 +444,9 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `REMINDER_LATE_HOURS` | `24` | A reminder missed by more than this is dropped |
 | `REMINDER_MAX_DAYS_AHEAD` | `366` | Furthest a reminder can be set |
 | `AGENDA_WINDOW_HOURS` | `2` | Agenda is sent only within this long after its time |
+| `COACH_POLL_SECONDS` | `60` | How often coach check-ins are looked for |
+| `COACH_WINDOW_HOURS` | `2` | A coach message is sent only within this long after its time |
+| `TRACKING_WINDOW_HOURS` | `2` | A tracking nudge is sent only within this long after its time |
 | `CALENDAR_POLL_SECONDS` | `120` | How often calendars are checked for agenda and meeting alerts |
 
 ## Roadmap
@@ -385,5 +466,7 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | 15 | Reminders and scheduler (Telegram reminders, morning agenda, meeting alerts) | Done |
 | 16 | Fitness: meals, workouts, weight, goals, progress | Done |
 | 17 | Food photo analysis | Planned |
-| 18 | Coach (goal-aware reminders and reviews) | Planned |
-| 19 | Long-term memory | Planned |
+| 18 | Coach (goal-aware check-ins, weekly review, over/under eating and training verdicts) | Done |
+| 19 | Personal plan: intake, BMR/targets, health screen, 7-day workout and meal plans, fitness memory, tracking nudges | Done |
+| 20 | General long-term memory | Planned |
+

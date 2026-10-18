@@ -270,7 +270,7 @@ class FitnessService:
         self,
         user_id: int,
         *,
-        mode: str,
+        mode: str | None,
         target_weight: float | None,
         unit: str | None,
         daily_calories: int | None,
@@ -278,50 +278,68 @@ class FitnessService:
         weekly_workouts: int | None,
         today: date,
     ) -> tuple[FitnessGoal, str, list[str]]:
+        """Create or UPDATE the goal. Anything left out keeps its current value."""
         chosen = self.unit(user_id, unit)
         warnings: list[str] = []
+        existing = self.goals.get(user_id)
         latest = self.weights.latest(user_id, today)
-        target_kg = to_kg(target_weight, chosen) if target_weight is not None else None
 
-        if target_kg is not None and latest is not None:
-            if mode == "cut" and target_kg >= latest.weight_kg:
+        if mode is None:
+            if existing is None:
+                raise FitnessError("Which goal: cut, bulk or maintain? Ask the user.")
+            mode = existing.mode
+        mode_changed = existing is not None and existing.mode != mode
+
+        target_kg = to_kg(target_weight, chosen) if target_weight is not None else None
+        if target_kg is None and existing is not None and not mode_changed:
+            target_kg = existing.target_weight_kg  # keep it; a new mode needs a new target
+
+        if target_weight is not None and latest is not None:
+            if mode == "cut" and target_kg is not None and target_kg >= latest.weight_kg:
                 raise FitnessError(
                     "A cut needs a target below the current weight "
                     f"({from_kg(latest.weight_kg, chosen)} {chosen}). Ask the user to confirm."
                 )
-            if mode == "bulk" and target_kg <= latest.weight_kg:
+            if mode == "bulk" and target_kg is not None and target_kg <= latest.weight_kg:
                 raise FitnessError(
                     "A bulk needs a target above the current weight "
                     f"({from_kg(latest.weight_kg, chosen)} {chosen}). Ask the user to confirm."
                 )
-        if mode == "maintain" and target_kg is not None:
-            raise FitnessError("A maintain goal has no target weight. Leave it out.")
+        if mode == "maintain":
+            if target_weight is not None:
+                raise FitnessError("A maintain goal has no target weight. Leave it out.")
+            target_kg = None
 
-        if daily_calories is not None:
-            if not (MIN_DAILY_CALORIES_TARGET <= daily_calories <= MAX_DAILY_CALORIES_TARGET):
+        def keep(new: int | None, old: int | None) -> int | None:
+            return new if new is not None else old
+
+        calories = keep(daily_calories, existing.daily_calories if existing else None)
+        protein = keep(daily_protein_g, existing.daily_protein_g if existing else None)
+        workouts = keep(weekly_workouts, existing.weekly_workouts if existing else None)
+
+        if calories is not None:
+            if not (MIN_DAILY_CALORIES_TARGET <= calories <= MAX_DAILY_CALORIES_TARGET):
                 raise FitnessError(
                     f"Daily calories must be between {MIN_DAILY_CALORIES_TARGET} and "
                     f"{MAX_DAILY_CALORIES_TARGET}."
                 )
-            if daily_calories < LOW_CALORIE_WARNING:
+            if calories < LOW_CALORIE_WARNING:
                 warnings.append(
-                    f"{daily_calories} kcal a day is very low. Suggest checking it with a "
+                    f"{calories} kcal a day is very low. Suggest checking it with a "
                     "doctor or dietitian."
                 )
-        if daily_protein_g is not None and not (20 <= daily_protein_g <= 400):
+        if protein is not None and not (20 <= protein <= 400):
             raise FitnessError("Daily protein must be between 20 and 400 g.")
-        if weekly_workouts is not None and not (0 <= weekly_workouts <= 14):
+        if workouts is not None and not (0 <= workouts <= 14):
             raise FitnessError("Weekly workouts must be between 0 and 14.")
 
+        start_kg = (
+            latest.weight_kg
+            if (existing is None or mode_changed) and latest is not None
+            else (existing.start_weight_kg if existing else None)
+        )
         goal = self.goals.set(
-            user_id,
-            mode,
-            target_kg,
-            latest.weight_kg if latest is not None else None,
-            daily_calories,
-            daily_protein_g,
-            weekly_workouts,
-            today,
+            user_id, mode, target_kg, start_kg, calories, protein, workouts, today
         )
         return goal, chosen, warnings
 

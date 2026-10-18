@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     reminder_late_hours: int = 24  # a reminder missed by more than this is dropped, not sent
     reminder_max_days_ahead: int = 366
     agenda_window_hours: int = 2  # an agenda is sent only within this long after its time
+    coach_poll_seconds: float = 60.0  # how often coach check-ins are looked for
+    coach_window_hours: int = 2  # a check-in is sent only within this long after its time
+    tracking_window_hours: int = 2  # a tracking nudge is sent only within this long after its time
 
     # Expenses
     default_currency: str = "INR"

@@ -230,8 +230,12 @@ def list_weights(ctx: ToolContext, args: WeightHistoryArgs) -> dict[str, Any]:
 
 
 class SetGoalArgs(BaseModel):
-    mode: Literal["cut", "bulk", "maintain"] = Field(
-        description="cut = lose fat, bulk = gain muscle/weight, maintain = hold weight."
+    mode: Literal["cut", "bulk", "maintain"] | None = Field(
+        default=None,
+        description=(
+            "cut = lose fat, bulk = gain muscle/weight, maintain = hold weight. Omit to keep "
+            "the current mode when only changing a target."
+        ),
     )
     target_weight: float | None = Field(
         default=None, gt=0, le=1000, description="Target body weight. Not for maintain."
@@ -301,6 +305,12 @@ class ProgressArgs(BaseModel):
 
 def get_progress(ctx: ToolContext, args: ProgressArgs) -> dict[str, Any]:
     return _svc(ctx).progress(ctx.user_id, ctx.today, args.days)
+
+
+def get_coaching(ctx: ToolContext, args: NoArgs) -> dict[str, Any]:
+    from app.coach.service import CoachService
+
+    return CoachService(ctx.db).review_out(ctx.user_id, ctx.today)
 
 
 # ----------------------------------------------------------------- deletes
@@ -397,8 +407,9 @@ FITNESS_TOOLS: list[Tool] = [
     Tool(
         name="set_goal",
         description=(
-            "Set or replace the user's goal: cut, bulk or maintain, with optional target weight, "
-            "daily calories, daily protein and weekly workouts."
+            "Set or update the user's goal: cut, bulk or maintain, with optional target weight, "
+            "daily calories, daily protein and weekly workouts. Only pass what changed; "
+            "everything else is kept."
         ),
         args_model=SetGoalArgs,
         handler=set_goal,
@@ -430,6 +441,18 @@ FITNESS_TOOLS: list[Tool] = [
         ),
         args_model=ProgressArgs,
         handler=get_progress,
+        domain="fitness",
+    ),
+    Tool(
+        name="get_coaching",
+        description=(
+            "The coach's verdicts on the user's last 7 days, computed from their logs: "
+            "under- or over-eating, low protein, overtraining or under-training, weight trend. "
+            "Use it for 'how am I doing', 'what should I improve', 'am I overtraining', "
+            "'am I eating enough', 'push me' or 'motivate me'."
+        ),
+        args_model=NoArgs,
+        handler=get_coaching,
         domain="fitness",
     ),
     Tool(

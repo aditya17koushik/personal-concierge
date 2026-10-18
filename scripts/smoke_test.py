@@ -530,6 +530,12 @@ def run_checks(r: Runner, skip_llm: bool, include_disconnect: bool = False) -> N
         assert res.status_code == 200, f"cleanup approve -> HTTP {res.status_code}"
         return f"+{after['calories'] - before} kcal logged as an estimate, then removed"
 
+    def coach_answer() -> str:
+        body = r.chat("Am I eating enough and training enough? Give me honest advice.")
+        assert_tools(body, "get_coaching")
+        return "coach flags used"
+
+    r.check("coach: 'how am I doing' uses the coach's verdicts", coach_answer)
     r.check("GET /fitness/day", fitness_day)
     r.check("GET /fitness/progress", fitness_progress)
     r.check("GET /fitness/goal", fitness_goal)

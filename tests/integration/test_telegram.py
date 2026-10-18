@@ -1041,3 +1041,123 @@ async def test_fitness_commands_need_an_invite(session_factory):
     rig = make_rig(session_factory)
     await rig.send("/today", user=999)
     assert rig.tg.texts[-1].startswith("This is a private assistant")
+
+
+# --------------------------------------------------------------- coach commands
+
+
+@pytest.mark.asyncio
+async def test_coach_commands_turn_messages_on_and_off(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/coach")
+    assert "Coach messages are off" in rig.tg.texts[-1]
+
+    await rig.send("/coach on 21:30")
+    assert "Coach is on" in rig.tg.texts[-1] and "21:30" in rig.tg.texts[-1]
+    await rig.send("/coach")
+    assert "check-in at 21:30" in rig.tg.texts[-1] and "Sunday" in rig.tg.texts[-1]
+
+    await rig.send("/coach weekly friday")
+    assert "weekly review is now on Friday" in rig.tg.texts[-1]
+    await rig.send("/coach off")
+    assert rig.tg.texts[-1] == "Coach messages are off."
+    await rig.send("/coach")
+    assert "Coach messages are off" in rig.tg.texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_coach_commands_reject_bad_input(session_factory):
+    rig = make_rig(session_factory)
+    for arg, expected in (
+        ("on 25:00", "24-hour time"),
+        ("on noon", "24-hour time"),
+        ("weekly someday", "weekday"),
+        ("maybe", "Usage:"),
+        ("on 20:00 extra words", "Usage:"),
+    ):
+        await rig.send(f"/coach {arg}")
+        assert expected in rig.tg.texts[-1], arg
+
+
+@pytest.mark.asyncio
+async def test_review_command_is_built_by_code(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/review")
+    assert rig.tg.texts[-1].startswith("Weekly review (last 7 days)")
+    assert "You have not set a goal yet." in rig.tg.texts[-1]
+    assert rig.provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_coach_commands_need_an_invite(session_factory):
+    rig = make_rig(session_factory)
+    for command in ("/coach on", "/review"):
+        await rig.send(command, user=999)
+        assert rig.tg.texts[-1].startswith("This is a private assistant")
+
+
+# ------------------------------------------------------- plan and tracking commands
+
+
+@pytest.mark.asyncio
+async def test_plan_command_without_a_plan_explains_how_to_start(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/plan")
+    assert "no plan yet" in rig.tg.texts[-1]
+    assert rig.provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_plan_command_shows_today_and_the_week(session_factory):
+    from decimal import Decimal
+
+    from app.database.repositories.fitness import WeightRepository
+    from app.database.repositories.telegram import TelegramRepository
+    from app.fitness.plan_service import PlanService
+    from app.fitness.profile import FitnessProfileService
+    from app.fitness.service import FitnessService
+    from tests.integration.test_plans import PlanLLM
+    from tests.integration.test_targets import full_profile
+
+    rig = make_rig(session_factory)
+    await rig.send("/start")
+    with session_factory() as db:
+        link = TelegramRepository(db).get_link(ADMIN)
+        assert link is not None
+        uid = link.user_id
+        FitnessProfileService(db).save(uid, TODAY, **full_profile())
+        WeightRepository(db).upsert(uid, TODAY, Decimal("80.0"))
+        FitnessService(db).set_goal(uid, mode="cut", target_weight=None, unit=None, daily_calories=None,
+                                    daily_protein_g=None, weekly_workouts=None, today=TODAY)  # fmt: skip
+        await PlanService(db).create(uid, TODAY, PlanLLM())
+
+    await rig.send("/plan")
+    assert "Plan v1" in rig.tg.texts[-1] and "Workout:" in rig.tg.texts[-1]
+    await rig.send("/plan week")
+    assert "WORKOUTS" in rig.tg.texts[-1] and "MEALS" in rig.tg.texts[-1]
+    assert rig.provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tracking_command(session_factory):
+    rig = make_rig(session_factory)
+    await rig.send("/tracking")
+    assert "off" in rig.tg.texts[-1]
+    await rig.send("/tracking on")
+    assert "are on" in rig.tg.texts[-1] and "lunch 14:30" in rig.tg.texts[-1]
+    await rig.send("/tracking lunch 13:30")
+    assert "lunch 13:30" in rig.tg.texts[-1]
+    await rig.send("/tracking off")
+    assert "are off" in rig.tg.texts[-1]
+    await rig.send("/tracking lunch noon")
+    assert "24-hour" in rig.tg.texts[-1]
+    await rig.send("/tracking now please maybe")
+    assert "Usage" in rig.tg.texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_plan_and_tracking_commands_need_an_invite(session_factory):
+    rig = make_rig(session_factory)
+    for command in ("/plan", "/tracking on"):
+        await rig.send(command, user=999)
+        assert rig.tg.texts[-1].startswith("This is a private assistant")

@@ -158,5 +158,26 @@ async def test_agent_stops_runaway_tool_loop(db: Session, passthrough_jev):
 
     result = await service.chat("u1", "loop forever")
 
-    assert len(provider.calls) == MAX_TOOL_ROUNDS
+    assert len(provider.calls) == MAX_TOOL_ROUNDS + 1  # the last call is the no-tools wrap-up
     assert "couldn't complete" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_after_the_tool_limit_the_model_still_reports_what_it_did(db: Session, passthrough_jev):
+    responses = [tool_response("list_expenses", {})] * MAX_TOOL_ROUNDS + [
+        LLMResponse(content="All done, here is the summary.", model="m")
+    ]
+    provider = ScriptedProvider(responses)
+    service = AgentService(provider, db, today_fn=lambda: TODAY, jev=passthrough_jev)
+
+    result = await service.chat("u1", "do a lot")
+
+    assert result.reply == "All done, here is the summary."
+    assert len(provider.calls) == MAX_TOOL_ROUNDS + 1
+
+
+def test_expense_prompt_tells_the_model_to_keep_the_users_currency():
+    from app.agent.service import PROMPT_SECTIONS
+
+    text = PROMPT_SECTIONS["expense"]
+    assert "currency symbol or code" in text and "never convert" in text

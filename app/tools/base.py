@@ -9,6 +9,7 @@ from app.decisions.schemas import Risk
 
 if TYPE_CHECKING:
     from app.integrations.google.oauth import GoogleOAuthService
+    from app.llm.base import LLMProvider
 
 
 @dataclass
@@ -23,6 +24,7 @@ class ToolContext:
     google_oauth: "GoogleOAuthService | None" = None
     timezone: str = "UTC"  # the user's profile timezone
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    llm: "LLMProvider | None" = None  # for tools that generate content (training/meal plans)
 
 
 ToolResult = dict[str, Any]

@@ -47,6 +47,15 @@ def dummy_tool(name: str, domain: str, **kw: Any) -> Tool:
     )
 
 
+def fitness_reads() -> set[str]:
+    """Every read-only fitness tool. New read tools join this set automatically."""
+    return {
+        t.name
+        for t in build_default_registry().tools
+        if t.domain == "fitness" and not t.requires_approval and not t.side_effects
+    }
+
+
 def make_answers(
     needs: tuple[str, ...] = (),
     risk: str = "low",
@@ -249,7 +258,7 @@ def test_high_risk_with_no_domain_offers_gated_tools_as_proposals():
     assert decision.intents == ["general"]
     assert set(decision.blocked_tools) == {"delete_expense", "delete_log_entry", "create_event", "update_event", "delete_event", "rsvp_event"}
     assert set(decision.allowed_tools) == {
-        "list_meals", "list_workouts", "list_weights", "get_goal", "get_day_summary", "get_progress",
+        *fitness_reads(),
         "list_expenses", "get_expense_summary", "list_events", "get_event", "find_free_time",
     }
 
@@ -703,7 +712,7 @@ async def test_high_risk_with_no_domain_goes_to_propose_mode_not_a_dead_end(db: 
     assert result.pending_approvals == []
     assert len(provider.calls) == 1  # the model decided, not a canned refusal
     assert provider.calls[0].tool_names == {
-        "list_meals", "list_workouts", "list_weights", "get_goal", "get_day_summary",
+        *fitness_reads(),
         "get_progress", "delete_log_entry",
         "list_expenses", "get_expense_summary", "delete_expense",
         "list_events", "get_event", "find_free_time", "create_event", "update_event", "delete_event", "rsvp_event",

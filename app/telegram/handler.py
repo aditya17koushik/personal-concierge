@@ -17,6 +17,8 @@ from app.llm.base import LLMError
 from app.profiles.service import ProfileError, ProfileService, local_today
 from app.schemas.approvals import PendingApprovalOut
 from app.telegram.users import InviteError, LinkedUser, TelegramUsers
+from app.coach.service import WEEKDAYS, CoachService
+from app.fitness.plan_service import PlanService, format_plan_today, format_plan_week
 from app.fitness.service import (
     FitnessService,
     format_day,
@@ -24,6 +26,7 @@ from app.fitness.service import (
     format_progress,
     goal_out,
 )
+from app.tracking.service import TrackingService
 from app.reminders.service import ReminderService, describe
 from app.usage.service import QuotaService, RateLimitExceeded
 
@@ -55,6 +58,12 @@ HELP_TEXT = (
     "/today - what you ate, trained and weigh today (/today yesterday)\n"
     "/progress - weight, food and training trend (/progress 7, /progress 90)\n"
     "/goal - your current goal and targets\n"
+    "/plan - today's planned workout and meals (/plan week for all 7 days)\n"
+    "/tracking - reminders when a meal or workout is not logged (/tracking on, /tracking off, "
+    "/tracking lunch 13:30)\n"
+    "/review - your coach's review of the last 7 days\n"
+    "/coach - evening check-ins and a weekly review (/coach on 20:00, /coach off, "
+    "/coach weekly sunday)\n"
     "/reminders - your pending reminders (/reminders cancel <id>)\n"
     "/agenda - daily morning summary (/agenda on 08:00, /agenda off)\n"
     "/meetings - alert before meetings (/meetings 15, /meetings off)\n"
@@ -293,6 +302,14 @@ class TelegramHandler:
             await self._list_approvals(link, chat_id)
         elif command in ("/today", "/progress", "/goal"):
             await self._fitness(link, chat_id, command, arg)
+        elif command == "/plan":
+            await self._plan(link, chat_id, arg)
+        elif command == "/tracking":
+            await self._tracking(link, chat_id, arg)
+        elif command == "/review":
+            await self._coach_review(link, chat_id)
+        elif command == "/coach":
+            await self._coach(link, chat_id, arg)
         elif command == "/reminders":
             await self._reminders(link, chat_id, arg)
         elif command == "/agenda":
@@ -500,6 +517,112 @@ class TelegramHandler:
             return format_goal(goal_out(goal, svc.unit(link.user_id)))
 
         await self._send(chat_id, await self._db(load))
+
+    async def _plan(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        """Show the saved plan. Built by code; creating or changing it is done by chatting."""
+        now = self._now_fn()
+        week = arg.strip().lower() == "week"
+
+        def load(db: Session) -> str:
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            today = local_today(profile.timezone, now)
+            plan = PlanService(db).active(link.user_id)
+            if plan is None:
+                return (
+                    "You have no plan yet. Tell me you want a workout and meal plan and I will "
+                    "ask a few questions (age, height, weight, goal, health conditions...)."
+                )
+            return format_plan_week(plan) if week else format_plan_today(plan, today)
+
+        await self._send(chat_id, await self._db(load))
+
+    async def _tracking(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        words = arg.lower().split()
+        usage = "Usage:\n/tracking on\n/tracking off\n/tracking lunch 13:30 (breakfast, lunch, dinner, workout)"
+        try:
+            if not words:
+                await self._send(chat_id, await self._db(lambda db: TrackingService(db).status_text(link.user_id)))
+                return
+            if words == ["on"] or words == ["off"]:
+                await self._db(
+                    lambda db: TrackingService(db).configure(link.user_id, enabled=words[0] == "on")
+                )
+            elif len(words) == 2:
+                await self._db(
+                    lambda db: TrackingService(db).configure(
+                        link.user_id, enabled=True, times={words[0]: words[1]}
+                    )
+                )
+            else:
+                await self._send(chat_id, usage)
+                return
+        except ProfileError as exc:
+            await self._send(chat_id, f"{exc}\n{usage}")
+            return
+        await self._send(chat_id, await self._db(lambda db: TrackingService(db).status_text(link.user_id)))
+
+    async def _coach_review(self, link: LinkedUser, chat_id: int) -> None:
+        """The weekly-style review on demand. Built by code; the model is not involved."""
+
+        def load(db: Session) -> str:
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            today = local_today(profile.timezone, self._now_fn())
+            return CoachService(db).weekly_text(link.user_id, today)
+
+        await self._send(chat_id, await self._db(load))
+
+    async def _coach(self, link: LinkedUser, chat_id: int, arg: str) -> None:
+        words = arg.lower().split()
+        usage = (
+            "Usage:\n/coach on 20:00 - evening check-ins at that time\n/coach off\n"
+            "/coach weekly sunday - the weekly review replaces that day's check-in"
+        )
+        try:
+            if not words:
+                row = await self._db(lambda db: CoachService(db).settings.get(link.user_id))
+                if row is None or not row.enabled:
+                    await self._send(
+                        chat_id,
+                        "Coach messages are off.\n/coach on 20:00 turns on a daily evening "
+                        "check-in, plus a weekly review. /review shows one now.",
+                    )
+                else:
+                    await self._send(
+                        chat_id,
+                        f"Coach is on: check-in at {row.checkin_time}, weekly review on "
+                        f"{WEEKDAYS[row.weekly_day].title()}. /coach off to stop.",
+                    )
+                return
+            if words[0] == "on" and len(words) <= 2:
+                row = await self._db(
+                    lambda db: CoachService(db).configure(
+                        link.user_id, enabled=True, time_text=words[1] if len(words) == 2 else None
+                    )
+                )
+                await self._send(
+                    chat_id,
+                    f"Coach is on. I'll check in daily at {row.checkin_time} "
+                    f"({WEEKDAYS[row.weekly_day].title()} is the weekly review). "
+                    "Make sure your /timezone is set.",
+                )
+            elif words[0] == "off" and len(words) == 1:
+                await self._db(lambda db: CoachService(db).configure(link.user_id, enabled=False))
+                await self._send(chat_id, "Coach messages are off.")
+            elif words[0] == "weekly" and len(words) == 2:
+                row = await self._db(
+                    lambda db: CoachService(db).configure(link.user_id, weekday=words[1])
+                )
+                await self._send(
+                    chat_id, f"The weekly review is now on {WEEKDAYS[row.weekly_day].title()}."
+                )
+            else:
+                await self._send(chat_id, usage)
+        except ProfileError as exc:
+            await self._send(chat_id, f"{exc.message}\n\n{usage}")
 
     async def _invite(self, admin: LinkedUser, chat_id: int) -> None:
         code, _expires = await self._db(

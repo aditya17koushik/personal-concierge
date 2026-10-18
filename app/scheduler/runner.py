@@ -18,8 +18,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.coach.service import CoachService
+from app.database.repositories.coach import CoachSettingsRepository
 from app.database.repositories.profiles import ProfileRepository
 from app.database.repositories.reminders import ReminderRepository
+from app.database.repositories.tracking import TrackingRepository
 from app.database.repositories.telegram import TelegramRepository
 from app.integrations.google.calendar import CalendarClient, CalendarError
 from app.integrations.google.oauth import (
@@ -29,6 +32,7 @@ from app.integrations.google.oauth import (
 )
 from app.integrations.telegram.client import TelegramAPI, TelegramError
 from app.reminders.service import aware, format_local, next_occurrence
+from app.tracking.service import TrackingService
 from app.scheduler.agenda import build_agenda, build_event_alert, safe
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,7 @@ class SchedulerRunner:
         self._now = now_fn
         self._sleep = sleep
         self._last_calendar_poll: datetime | None = None
+        self._last_coach_poll: datetime | None = None
 
     # ------------------------------------------------------------------ loop
 
@@ -113,6 +118,12 @@ class SchedulerRunner:
         if self._last_calendar_poll is None or now - self._last_calendar_poll >= poll:
             self._last_calendar_poll = now
             await self.calendar_pass()
+
+        coach_poll = timedelta(seconds=self._settings.coach_poll_seconds)
+        if self._last_coach_poll is None or now - self._last_coach_poll >= coach_poll:
+            self._last_coach_poll = now
+            await self.coach_pass()
+            await self.tracking_pass()
 
     async def _db(self, fn: Callable[[Session], T]) -> T:
         def run() -> T:
@@ -320,3 +331,127 @@ class SchedulerRunner:
                         user.user_id, e["id"], e["start_raw"]
                     )
                 )
+
+
+    # ------------------------------------------------------------ coach
+
+    async def coach_pass(self) -> None:
+        """Evening check-in, or the weekly review on the user's chosen weekday (one message a day)."""
+        now = self._now()
+
+        def load(db: Session) -> list[CoachUser]:
+            telegram = TelegramRepository(db)
+            profiles = ProfileRepository(db)
+            users: list[CoachUser] = []
+            for c in CoachSettingsRepository(db).enabled():
+                link = telegram.get_link_for_user(c.user_id)
+                profile = profiles.get(c.user_id)
+                if link is None or profile is None:
+                    continue
+                users.append(
+                    CoachUser(
+                        c.user_id,
+                        link.telegram_user_id,
+                        profile.timezone,
+                        c.checkin_time or "20:00",
+                        c.weekly_day,
+                        c.last_sent_on,
+                    )
+                )
+            return users
+
+        for user in await self._db(load):
+            try:
+                await self._maybe_send_coach(user, now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Coach pass failed for user_id=%s", user.user_id)
+
+    async def _maybe_send_coach(self, user: "CoachUser", now: datetime) -> None:
+        tz = ZoneInfo(user.timezone)
+        local = now.astimezone(tz)
+        today = local.date()
+        hour, minute = (int(x) for x in user.checkin_time.split(":"))
+        scheduled = datetime.combine(today, datetime.min.time(), tzinfo=tz).replace(
+            hour=hour, minute=minute
+        )
+        window = timedelta(hours=self._settings.coach_window_hours)
+        if not (scheduled <= local < scheduled + window):
+            return
+        if user.last_sent_on is not None and user.last_sent_on >= today:
+            return
+
+        claimed = await self._db(
+            lambda db: CoachSettingsRepository(db).claim_send(user.user_id, today)
+        )
+        if not claimed:
+            return
+
+        def compose(db: Session) -> str:
+            service = CoachService(db)
+            if local.weekday() == user.weekly_day:
+                return service.weekly_text(user.user_id, today)
+            return service.checkin_text(user.user_id, today, local.hour)
+
+        try:
+            text = await self._db(compose)
+            await self._client.send_message(user.chat_id, text)
+        except Exception:
+            logger.exception("Coach message failed for user_id=%s; will retry", user.user_id)
+            await self._db(
+                lambda db: CoachSettingsRepository(db).release_send(user.user_id, user.last_sent_on)
+            )
+
+
+    # --------------------------------------------------------- tracking nudges
+
+    async def tracking_pass(self) -> None:
+        """Nudge users whose planned meal or workout is not logged. At most one claim per slot/day."""
+        now = self._now()
+        window = timedelta(hours=self._settings.tracking_window_hours)
+
+        def load(db: Session) -> list[tuple[int, int, str]]:
+            telegram = TelegramRepository(db)
+            profiles = ProfileRepository(db)
+            users: list[tuple[int, int, str]] = []
+            for t in TrackingRepository(db).enabled():
+                link = telegram.get_link_for_user(t.user_id)
+                profile = profiles.get(t.user_id)
+                if link is not None and profile is not None:
+                    users.append((t.user_id, link.telegram_user_id, profile.timezone))
+            return users
+
+        for user_id, chat_id, tz in await self._db(load):
+            try:
+                local = now.astimezone(ZoneInfo(tz))
+                nudges = await self._db(lambda db: TrackingService(db).due(user_id, local, window))
+                for nudge in nudges:
+                    claimed = await self._db(
+                        lambda db: TrackingRepository(db).claim_nudge(user_id, local.date(), nudge.slot)
+                    )
+                    if not claimed:
+                        continue
+                    try:
+                        await self._client.send_message(chat_id, nudge.text)
+                    except Exception:
+                        logger.exception("Tracking nudge failed for user_id=%s; will retry", user_id)
+                        await self._db(
+                            lambda db: TrackingRepository(db).release_nudge(
+                                user_id, local.date(), nudge.slot
+                            )
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Tracking pass failed for user_id=%s", user_id)
+
+
+@dataclass(frozen=True)
+class CoachUser:
+    user_id: int
+    chat_id: int
+    timezone: str
+    checkin_time: str
+    weekly_day: int
+    last_sent_on: date | None

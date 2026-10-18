@@ -14,7 +14,9 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
         "what they ate or drank (a plain statement like 'I had 2 rotis and dal for lunch' "
         "counts, no question needed), a workout or activity they did, their body weight "
         "('I weigh 78 kg'), a diet or fitness goal ('I want to cut', 'bulk', 'lose weight'), "
-        "or any question about their calories, protein, workouts or progress"
+        "or any question about their calories, protein, workouts or progress, or asking for "
+        "coaching, feedback or advice on their diet, training or results ('how am I doing?', "
+        "'am I eating enough?', 'push me')"
     ),
     "reminder": "the user's reminders (setting a reminder to be messaged later, listing or cancelling reminders)",
 }

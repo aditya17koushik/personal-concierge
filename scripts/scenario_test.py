@@ -593,6 +593,35 @@ def _(r: Runner) -> str:
             remove_meals(r, "scenario-private")
 
 
+@scenario("fitness", "'how am I doing' is answered from the coach's verdicts")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("How am I doing with my diet and training? Be honest.")
+    assert "get_coaching" in body["tools_used"], describe(body)
+    assert not pending_of(body)
+    assert len(body["reply"]) > 40, "reply is too short to be coaching"
+    return f"tools={body['tools_used']}"
+
+
+@scenario("fitness", "a plan request starts the intake instead of inventing numbers")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("I want a workout and meal plan. Please start.")
+    assert "get_fitness_profile" in body["tools_used"], describe(body)
+    assert "create_plan" not in body["tools_used"], describe(body)
+    assert "?" in body["reply"], "it should ask for the missing details"
+    return f"tools={body['tools_used']}"
+
+
+@scenario("fitness", "skipping a meal is acknowledged without scolding")
+def _(r: Runner) -> str:
+    fresh(r)
+    body = r.chat("I skipped lunch today")
+    assert "skip_tracking" in body["tools_used"], describe(body)
+    assert not pending_of(body)
+    return f"tools={body['tools_used']}"
+
+
 @scenario("email", "search and read (read-only)")
 def _(r: Runner) -> str:
     need_google(r)

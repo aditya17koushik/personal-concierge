@@ -1,11 +1,19 @@
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database.models import BodyWeight, FitnessGoal, Meal, Workout
+from app.database.models import (
+    BodyWeight,
+    FitnessGoal,
+    FitnessPlan,
+    FitnessProfile,
+    Meal,
+    Workout,
+)
 
 
 class MealRepository:
@@ -231,3 +239,76 @@ class GoalRepository:
         result = self._db.execute(delete(FitnessGoal).where(FitnessGoal.user_id == user_id))
         self._db.commit()
         return result.rowcount == 1  # type: ignore[attr-defined]
+
+
+class FitnessProfileRepository:
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def get(self, user_id: int) -> FitnessProfile | None:
+        return self._db.get(FitnessProfile, user_id)
+
+    def save(self, user_id: int, **fields: object) -> FitnessProfile:
+        """Create or update. Only the given fields change."""
+        row = self.get(user_id)
+        if row is None:
+            row = FitnessProfile(user_id=user_id)
+            self._db.add(row)
+        for name, value in fields.items():
+            setattr(row, name, value)
+        self._db.commit()
+        self._db.refresh(row)
+        return row
+
+
+class PlanRepository:
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def active(self, user_id: int) -> FitnessPlan | None:
+        return self._db.scalar(
+            select(FitnessPlan).where(FitnessPlan.user_id == user_id, FitnessPlan.status == "active")
+        )
+
+    def history(self, user_id: int, limit: int = 10) -> list[FitnessPlan]:
+        return list(
+            self._db.scalars(
+                select(FitnessPlan)
+                .where(FitnessPlan.user_id == user_id)
+                .order_by(FitnessPlan.version.desc())
+                .limit(limit)
+            )
+        )
+
+    def add(
+        self,
+        user_id: int,
+        workout: dict[str, Any],
+        meals: dict[str, Any],
+        targets: dict[str, Any],
+        inputs: dict[str, Any],
+        reason: str,
+    ) -> FitnessPlan:
+        """The new plan becomes active; the old one is archived, in one transaction."""
+        latest = self._db.scalar(
+            select(func.max(FitnessPlan.version)).where(FitnessPlan.user_id == user_id)
+        )
+        self._db.execute(
+            update(FitnessPlan)
+            .where(FitnessPlan.user_id == user_id, FitnessPlan.status == "active")
+            .values(status="archived")
+        )
+        plan = FitnessPlan(
+            user_id=user_id,
+            version=(latest or 0) + 1,
+            status="active",
+            workout=workout,
+            meals=meals,
+            targets=targets,
+            inputs=inputs,
+            reason=reason[:300],
+        )
+        self._db.add(plan)
+        self._db.commit()
+        self._db.refresh(plan)
+        return plan
