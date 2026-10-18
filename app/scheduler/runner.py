@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.observability import get_tracer
 from app.config import Settings
 from app.coach.service import CoachService
 from app.database.repositories.coach import CoachSettingsRepository
@@ -185,6 +186,7 @@ class SchedulerRunner:
 
         try:
             await self._client.send_message(chat_id, text)
+            get_tracer().event("scheduler.reminder_sent", metadata={"user": f"u{item.user_id}", "late_seconds": int(late.total_seconds())})
         except TelegramError as exc:
             # 400/403: the chat is gone or the bot was blocked. Retrying will not help.
             permanent = exc.status in (400, 403)
@@ -276,6 +278,7 @@ class SchedulerRunner:
             text = await self._compose_agenda(user, today)
             assert user.chat_id is not None
             await self._client.send_message(user.chat_id, text)
+            get_tracer().event("scheduler.agenda_sent", metadata={"user": f"u{user.user_id}"})
         except Exception:
             logger.exception("Agenda failed for user_id=%s; will retry", user.user_id)
             await self._db(
@@ -325,6 +328,7 @@ class SchedulerRunner:
                 await self._client.send_message(
                     user.chat_id, build_event_alert(event, now, user.timezone)
                 )
+                get_tracer().event("scheduler.meeting_alert", metadata={"user": f"u{user.user_id}"})
             except TelegramError:
                 await self._db(
                     lambda db, e=event: ReminderRepository(db).forget_alert(
@@ -397,6 +401,7 @@ class SchedulerRunner:
         try:
             text = await self._db(compose)
             await self._client.send_message(user.chat_id, text)
+            get_tracer().event("scheduler.coach_sent", metadata={"user": f"u{user.user_id}"})
         except Exception:
             logger.exception("Coach message failed for user_id=%s; will retry", user.user_id)
             await self._db(
@@ -434,6 +439,9 @@ class SchedulerRunner:
                         continue
                     try:
                         await self._client.send_message(chat_id, nudge.text)
+                        get_tracer().event(
+                            "scheduler.tracking_nudge", metadata={"user": f"u{user_id}", "slot": nudge.slot}
+                        )
                     except Exception:
                         logger.exception("Tracking nudge failed for user_id=%s; will retry", user_id)
                         await self._db(

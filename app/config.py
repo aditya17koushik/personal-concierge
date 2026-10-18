@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     agenda_window_hours: int = 2  # an agenda is sent only within this long after its time
     coach_poll_seconds: float = 60.0  # how often coach check-ins are looked for
     coach_window_hours: int = 2  # a check-in is sent only within this long after its time
+    # Langfuse tracing: on when BOTH keys are set (cloud.langfuse.com or your own server).
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_environment: str | None = None  # defaults to APP_ENV
+    langfuse_capture_content: bool = True  # false = metadata only (no messages, prompts or replies)
+    langfuse_sample_rate: float = 1.0  # 1.0 = trace everything
+    photo_max_bytes: int = 5_000_000  # largest food photo we will download and analyze
+    photo_timeout_seconds: float = 60.0  # the whole photo analysis, including the model call
+    photo_draft_hours: int = 24  # an unconfirmed photo estimate expires after this long
     tracking_window_hours: int = 2  # a tracking nudge is sent only within this long after its time
 
     # Expenses
@@ -65,17 +75,12 @@ class Settings(BaseSettings):
     jev_high_risk_threshold: float = 0.3  # P(high risk) at/above this => high risk
     jev_refuse_threshold: float = 0.8  # clearly harmful
 
-    # Langfuse
-    langfuse_public_key: str = ""
-    langfuse_secret_key: str = ""
-    langfuse_base_url: str = "https://cloud.langfuse.com"
-
     # Telegram
     telegram_bot_token: str = ""
     telegram_admin_id: int = 0  # your numeric Telegram id; 0 disables the bot
     telegram_admin_external_id: str = "me"  # internal user the admin maps to
     telegram_poll_timeout: int = 30
-    telegram_agent_timeout_seconds: int = 90
+    telegram_agent_timeout_seconds: int = 240  # plan creation calls the model several times
     telegram_invite_ttl_hours: int = 24
     telegram_max_users: int = 10  # cost guard until per-user limits exist
     public_base_url: str = "http://127.0.0.1:8000"

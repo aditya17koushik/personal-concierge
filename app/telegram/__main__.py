@@ -9,6 +9,9 @@ import sys
 from app.agent.factory import build_agent_service, build_approval_service
 from app.config import get_settings
 from app.database.session import SessionLocal
+from app.fitness.photos import PhotoAnalyzer
+from app.llm.factory import get_llm_provider
+from app.observability import get_tracer
 from app.integrations.telegram.client import TelegramClient, TelegramError
 from app.scheduler.runner import SchedulerRunner
 from app.telegram.bot import TelegramBot
@@ -48,6 +51,8 @@ async def amain(check_only: bool) -> int:
     if check_only:
         return 0
 
+    tracer = get_tracer()
+    print(tracer.check())
     await client.delete_webhook()  # polling can't coexist with a webhook
 
     handler = TelegramHandler(
@@ -57,6 +62,7 @@ async def amain(check_only: bool) -> int:
         agent_factory=lambda db: build_agent_service(db, settings),
         approvals_factory=lambda db: build_approval_service(db, settings),
         bot_username=username,
+        vision=PhotoAnalyzer(get_llm_provider()),
     )
     bot = TelegramBot(client, handler, poll_timeout=settings.telegram_poll_timeout)
 
@@ -76,6 +82,7 @@ async def amain(check_only: bool) -> int:
         stop.set()
         if scheduler_task is not None:
             await scheduler_task
+        await asyncio.to_thread(tracer.flush)  # send any traces still waiting
     return 0
 
 

@@ -33,7 +33,7 @@ class SaveProfileArgs(BaseModel):
         default=None, description="gym, home_dumbbells, home_minimal or none."
     )
     diet_pref: str | None = Field(
-        default=None, description="vegetarian, eggetarian, non_vegetarian or vegan."
+        default=None, description="vegetarian, eggetarian, non_vegetarian, pescatarian or vegan (map the user's words)."
     )
     allergies: str | None = Field(default=None, max_length=200, description="Foods to avoid.")
     cuisine: str | None = Field(default=None, max_length=100)

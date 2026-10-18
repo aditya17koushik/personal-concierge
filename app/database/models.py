@@ -523,3 +523,23 @@ class TrackingEvent(Base):
     day: Mapped[date] = mapped_column(Date)
     slot: Mapped[str] = mapped_column(String(10))  # breakfast|lunch|dinner|workout
     kind: Mapped[str] = mapped_column(String(8))  # nudged|skipped
+
+
+class FoodDraft(Base):
+    """A meal estimated from a photo, waiting for the user to tap [Log it]. The photo itself is
+    never stored: only these numbers."""
+
+    __tablename__ = "food_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    description: Mapped[str] = mapped_column(String(300))
+    calories: Mapped[int] = mapped_column(Integer)
+    protein_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    carbs_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    fat_g: Mapped[Decimal | None] = mapped_column(Numeric(6, 1), nullable=True)
+    confidence: Mapped[str] = mapped_column(String(6))  # low|medium|high
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending|logged|discarded
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -44,7 +44,7 @@ async def create_plan(ctx: ToolContext, args: CreatePlanArgs) -> dict[str, Any]:
     try:
         plan = await svc.create(ctx.user_id, ctx.today, llm)
     except PlanError as exc:
-        raise ToolError(str(exc)) from exc
+        raise ToolError(f"{exc} Do not call create_plan again in this reply: tell the user.") from exc
     out = await asyncio.to_thread(_view, ctx, plan.version, "week")
     out["tracking_reminders"] = await asyncio.to_thread(_enable_tracking, ctx)
     return out

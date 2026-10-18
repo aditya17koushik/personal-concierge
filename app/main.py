@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,14 +11,22 @@ from app.api.fitness import router as fitness_router
 from app.api.reminders import router as reminders_router
 from app.config import get_settings
 from app.llm.base import LLMError
+from app.observability import get_tracer
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    get_tracer().flush()  # send any traces still waiting
+
+
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(agent_router)

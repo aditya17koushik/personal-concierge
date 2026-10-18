@@ -18,7 +18,7 @@ SEXES = ("male", "female", "other")
 EXPERIENCE = ("beginner", "intermediate", "advanced")
 MUSCLE_LEVELS = ("low", "average", "high")
 EQUIPMENT = ("gym", "home_dumbbells", "home_minimal", "none")
-DIET_PREFS = ("vegetarian", "eggetarian", "non_vegetarian", "vegan")
+DIET_PREFS = ("vegetarian", "eggetarian", "non_vegetarian", "pescatarian", "vegan")
 
 KCAL_PER_KG_FAT = 7700
 FLOOR_MALE = 1500

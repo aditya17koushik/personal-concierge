@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.database.models import FitnessProfile
 from app.database.repositories.fitness import FitnessProfileRepository
 from app.fitness.service import FitnessError, FitnessService, clean, weight_out
+from app.fitness.normalize import normalize_choice
 from app.fitness.targets import (
     ACTIVITY_FACTORS,
     DIET_PREFS,
@@ -41,7 +42,7 @@ QUESTIONS = {
     "conditions": "any health conditions, injuries or surgeries (the answer 'none' is fine)",
     "days_per_week": "how many days a week they can train (1-6)",
     "equipment": "where they train: gym, home_dumbbells, home_minimal or none",
-    "diet_pref": "diet: vegetarian, eggetarian, non_vegetarian or vegan",
+    "diet_pref": "diet: vegetarian, eggetarian, non_vegetarian, pescatarian or vegan",
     "weight": "current weight (log it with log_weight)",
     "goal": "goal: cut, bulk or maintain (set it with set_goal)",
     "muscle_level": "current muscle level: low, average or high (optional)",
@@ -113,10 +114,13 @@ class FitnessProfileService:
             "diet_pref": DIET_PREFS,
         }
         if name in choices:
-            text = str(value).strip().lower()
-            if text not in choices[name]:
-                raise FitnessError(f"{name} must be one of: {', '.join(choices[name])}.")
-            return text
+            mapped = normalize_choice(name, value, tuple(choices[name]))
+            if mapped is None:
+                raise FitnessError(
+                    f"'{value}' is not a known {name.replace('_', ' ')}. Offer the user these options "
+                    f"to pick from: {', '.join(choices[name])}."
+                )
+            return mapped
         limits = {"conditions": 500, "preferred_workouts": 200, "allergies": 200, "cuisine": 100}
         if name in limits:
             return clean(str(value), limits[name])

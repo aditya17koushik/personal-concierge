@@ -175,6 +175,37 @@ async def test_calories_and_protein_must_fit_the_target():
 
 
 @pytest.mark.asyncio
+async def test_only_the_failing_days_are_regenerated():
+    bad = good_meals()
+    bad["days"][2]["meals"][1]["calories"] = 1500  # Wednesday blows the calorie budget
+    fixed_wed = {"days": [good_meals()["days"][2]]}
+    llm = PlanLLM(meals=[bad, fixed_wed])
+    meals = await PlanGenerator(llm).meals(inputs())
+    assert llm.meal_calls == 2 and len(meals["days"]) == 7
+    fix_prompt = llm.prompts[-1]
+    assert "ONLY these days: Wed" in fix_prompt and "Mon" not in fix_prompt.split("ONLY these days:")[1][:12]
+    assert sum(m["calories"] for m in meals["days"][2]["meals"]) < 2400
+    assert meals["days"][0] == good_meals()["days"][0]  # untouched days are kept as they were
+
+
+@pytest.mark.asyncio
+async def test_a_useless_repair_answer_is_retried():
+    bad = good_meals()
+    bad["days"][4]["meals"][0]["items"] = "peanut chutney"
+    llm = PlanLLM(meals=[bad, {"days": []}, {"days": [good_meals()["days"][4]]}])
+    await PlanGenerator(llm).meals(inputs(allergies="peanuts"))
+    assert llm.meal_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_the_meal_prompt_gives_per_meal_budgets():
+    llm = PlanLLM()
+    await PlanGenerator(llm).meals(inputs())
+    prompt = llm.prompts[0]
+    assert "Budget per day" in prompt and "breakfast ~550 kcal" in prompt and "protein" in prompt
+
+
+@pytest.mark.asyncio
 async def test_equipment_is_enforced():
     bad = good_workout()
     bad["days"][0]["exercises"][1]["name"] = "Barbell back squat"
@@ -209,7 +240,52 @@ async def test_three_failures_give_an_honest_error():
     llm = PlanLLM(meals=[good_meals(calories=4000)])
     with pytest.raises(PlanError) as info:
         await PlanGenerator(llm).meals(inputs())
-    assert "3 tries" in str(info.value) and llm.meal_calls == 3
+    assert "diet, allergies" in str(info.value)
+    assert llm.meal_calls == 5  # hard problems get extra, focused tries
+
+
+@pytest.mark.asyncio
+async def test_slightly_off_numbers_are_accepted_with_a_note_not_an_error():
+    llm = PlanLLM(meals=[good_meals(calories=2500, protein=150)])  # +14% kcal, protein 91%: soft
+    out = await PlanGenerator(llm).meals(inputs())
+    assert llm.meal_calls == 3
+    assert "slightly off your targets" in out["notes"]
+    assert len(out["days"]) == 7
+
+
+@pytest.mark.asyncio
+async def test_a_broken_diet_is_never_accepted():
+    bad = good_meals()
+    bad["days"][0]["meals"][1]["name"] = "Chicken curry"
+    llm = PlanLLM(meals=[bad])
+    with pytest.raises(PlanError):
+        await PlanGenerator(llm).meals(inputs(diet_pref="vegetarian"))
+
+
+def test_pescatarian_allows_fish_but_not_meat():
+    from app.fitness.plans import diet_violations
+
+    assert diet_violations("grilled salmon with rice, curd", "pescatarian") == []
+    assert "chicken" in diet_violations("chicken salad", "pescatarian")
+    assert diet_violations("egg bhurji and prawn curry", "pescatarian") == []
+
+
+def test_free_text_intake_answers_map_to_allowed_values():
+    from app.fitness.normalize import normalize_choice
+    from app.fitness.targets import DIET_PREFS, EQUIPMENT, ACTIVITY_FACTORS
+
+    diets = tuple(DIET_PREFS)
+    assert normalize_choice("diet_pref", "non veg", diets) == "non_vegetarian"
+    assert normalize_choice("diet_pref", "a mix of veg and non-veg", diets) == "non_vegetarian"
+    assert normalize_choice("diet_pref", "Non-Vegetarian", diets) == "non_vegetarian"
+    assert normalize_choice("diet_pref", "veg", diets) == "vegetarian"
+    assert normalize_choice("diet_pref", "vegatarian", diets) == "vegetarian"  # typo
+    assert normalize_choice("diet_pref", "pescetarian", diets) == "pescatarian"
+    assert normalize_choice("diet_pref", "xyzzy", diets) is None
+    assert normalize_choice("equipment", "dumbbells at home", tuple(EQUIPMENT)) == "home_dumbbells"
+    assert normalize_choice("equipment", "bodyweight", tuple(EQUIPMENT)) == "none"
+    assert normalize_choice("activity_level", "desk job", tuple(ACTIVITY_FACTORS)) == "sedentary"
+    assert normalize_choice("activity_level", "very active", tuple(ACTIVITY_FACTORS)) == "very_active"
 
 
 @pytest.mark.asyncio
@@ -469,3 +545,14 @@ async def test_plans_are_private(db: Session):
 
 def test_copy_import_is_used():
     assert copy.deepcopy(full_profile())["age"] == 30
+
+
+def test_non_vegetarian_diet_allows_meat_but_others_do_not():
+    from app.fitness.plans import diet_violations
+
+    text = "chicken curry with salmon and eggs"
+    assert diet_violations(text, "non_vegetarian") == []
+    assert "chicken" in diet_violations(text, "eggetarian")
+    assert "egg" not in " ".join(diet_violations("egg bhurji", "eggetarian"))
+    assert "chicken" in diet_violations(text, "vegetarian")
+    assert "egg" in " ".join(diet_violations("egg bhurji", "vegetarian"))

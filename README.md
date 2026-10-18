@@ -278,6 +278,24 @@ After pulling this phase: `alembic revision --autogenerate -m "add fitness profi
 only creates `fitness_profiles`, `fitness_plans`, `tracking_settings` and `tracking_events` (plus `meals`, `workouts`,
 `body_weights`, `fitness_goals`, `coach_settings` if you have not applied those yet), then `alembic upgrade head`.
 
+## Food photos
+
+Send a photo of a meal in Telegram (add a caption like "lunch at office" or "2 portions" if you like). The
+bot looks at it with the vision model and replies with an **estimate**: description, calories, protein, carbs, fat and a
+confidence (low/medium/high), with **[Log it]** and **[Discard]** buttons. **Nothing is logged until you tap Log it.**
+
+- The model only describes the plate and guesses portions. It has no tools, and anything written in the photo or caption is
+  treated as data, not instructions. Code validates the answer: calories are recomputed from the macros when they disagree by
+  more than 30%, one plate is capped at 3500 kcal, text is flattened, and a photo that is not food gets "I can't see a meal".
+- Log it saves an **estimated** meal (meal type from the time of day in your timezone). One tap logs it once; a second tap, another user's
+  tap, a discarded or an expired (24 h) estimate is refused. To fix the numbers afterwards, just say "make it 600 calories".
+- The photo is **not stored**: only the estimate (`food_drafts`). Max size `PHOTO_MAX_BYTES` (5 MB), JPEG/PNG/WebP, or an image sent as a file.
+- A photo counts as one message against the daily limit. Needs a vision-capable model (the default `gpt-4o-mini` is).
+- Config: `PHOTO_MAX_BYTES`, `PHOTO_TIMEOUT_SECONDS` (60), `PHOTO_DRAFT_HOURS` (24).
+
+After pulling this phase: `alembic revision --autogenerate -m "add food drafts"`, check that it only creates `food_drafts`,
+then `alembic upgrade head`.
+
 ## Reminders and scheduler
 
 Ask in plain words: "remind me to call Ravi at 6pm", "remind me in 30 minutes", "remind me every
@@ -342,6 +360,30 @@ its owner. A high-risk request with no approval-gated tool (for example "send an
 
 New approval-gated tools set `risk="high"` (or `medium` with `side_effects=True`) and must provide a
 `summarize` function; the registry refuses to start without one.
+
+## Langfuse: see every token, cost and decision
+
+With Langfuse you can see, per request: tokens, cost and latency of every model call, which tools ran, what Jev decided, plan generation, photo analysis, approvals and scheduler messages. It is **off until you set both keys**; with no keys the app behaves exactly as before and tracing can never break a request.
+
+Setup:
+
+1. `pip install "langfuse>=5,<6"` (add the same line to your requirements).
+2. Create a project at https://cloud.langfuse.com (free tier is enough) or self-host with Langfuse's official docker-compose, then copy the project's public and secret key.
+3. Add to `.env` (never paste the keys into chat or commit them):
+
+```
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+4. Restart `python -m app.telegram` (and uvicorn). The bot prints `Langfuse tracing is on.` at start, or tells you if the keys are wrong.
+
+What you will see: one trace per chat message (`agent.chat`, user `u<id>`, session `u<id>:<date>`) containing the Jev decision, each model call as a generation named by purpose (`agent`, `plan.workout`, `plan.meals`, `photo.estimate`) with input/output tokens and cost, and each tool call. Scheduler sends (`scheduler.reminder_sent`, `agenda_sent`, `coach_sent`, `tracking_nudge`, `meeting_alert`) and approvals (`approval.executed`, `approval.rejected`) appear as events. To see your total usage, open Dashboard or Generations and group by model or by name.
+
+Privacy: secrets (API tokens, bot tokens, Bearer/Google tokens) are masked; food photos are never uploaded (only their size); email and calendar content, and anything the model says after reading it, is replaced by a placeholder. Your own messages, replies, plans and health data are sent so you can debug, so use a project you control. To send only metadata (names, token counts, decisions, durations) set `LANGFUSE_CAPTURE_CONTENT=false`.
+
+Other settings: `LANGFUSE_ENVIRONMENT` (default: `APP_ENV`), `LANGFUSE_SAMPLE_RATE` (1.0 = everything).
 
 ## Database migrations
 
@@ -411,8 +453,10 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model name |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
 | `OLLAMA_MODEL` | `llama3.2:latest` | Ollama model name |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Langfuse credentials (Step 4) |
-| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse host |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Langfuse credentials; tracing is on only when both are set |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse host (cloud or your own server) |
+| `LANGFUSE_CAPTURE_CONTENT` | `true` | `false` = send metadata only (no messages or replies) |
+| `LANGFUSE_ENVIRONMENT` / `LANGFUSE_SAMPLE_RATE` | `APP_ENV` / `1.0` | Environment label and share of requests traced |
 | `TELEGRAM_BOT_TOKEN` | empty | Telegram bot (Step 12) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | empty | Google OAuth (Step 7) |
 | `APP_SECRET_KEY` | empty | Application secret |
@@ -421,7 +465,7 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `TELEGRAM_ADMIN_EXTERNAL_ID` | `me` | Internal user the admin maps to, so existing data carries over |
 | `TELEGRAM_MAX_USERS` | `10` | Cap on linked Telegram users |
 | `TELEGRAM_INVITE_TTL_HOURS` | `24` | Invite code lifetime |
-| `TELEGRAM_AGENT_TIMEOUT_SECONDS` | `90` | Give up on one request after this long |
+| `TELEGRAM_AGENT_TIMEOUT_SECONDS` | `240` | Give up on one request after this long |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Used to build the `/google` login link |
 | `APPROVAL_TTL_MINUTES` | `30` | How long a proposed action can be approved before it expires |
 | `DEFAULT_TIMEZONE` | `UTC` | Timezone for new profiles (users change theirs with `/timezone`) |
@@ -446,6 +490,9 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | `AGENDA_WINDOW_HOURS` | `2` | Agenda is sent only within this long after its time |
 | `COACH_POLL_SECONDS` | `60` | How often coach check-ins are looked for |
 | `COACH_WINDOW_HOURS` | `2` | A coach message is sent only within this long after its time |
+| `PHOTO_MAX_BYTES` | `5000000` | Largest food photo that is downloaded and analyzed |
+| `PHOTO_TIMEOUT_SECONDS` | `60` | Time allowed for downloading and analyzing a photo |
+| `PHOTO_DRAFT_HOURS` | `24` | How long an unconfirmed photo estimate stays valid |
 | `TRACKING_WINDOW_HOURS` | `2` | A tracking nudge is sent only within this long after its time |
 | `CALENDAR_POLL_SECONDS` | `120` | How often calendars are checked for agenda and meeting alerts |
 
@@ -465,7 +512,7 @@ Run from the project root. The tests need `DATABASE_URL` to be set (your `.env` 
 | 14 | Calendar actions: create, move, delete, RSVP, free time (approval-gated) | Done |
 | 15 | Reminders and scheduler (Telegram reminders, morning agenda, meeting alerts) | Done |
 | 16 | Fitness: meals, workouts, weight, goals, progress | Done |
-| 17 | Food photo analysis | Planned |
+| 17 | Food photo analysis (estimate, then Log it / Discard) | Done |
 | 18 | Coach (goal-aware check-ins, weekly review, over/under eating and training verdicts) | Done |
 | 19 | Personal plan: intake, BMR/targets, health screen, 7-day workout and meal plans, fitness memory, tracking nudges | Done |
 | 20 | General long-term memory | Planned |

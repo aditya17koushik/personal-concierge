@@ -15,6 +15,8 @@ from app.decisions.jev import Decider
 from app.decisions.schemas import Decision
 from app.integrations.google.oauth import GoogleOAuthService
 from app.llm.base import LLMError, LLMProvider
+from app.observability.setup import get_tracer
+from app.observability.tracing import external_scope, llm_task
 from app.profiles.service import (
     ProfileData,
     ProfileService,
@@ -116,7 +118,7 @@ PROMPT_SECTIONS: dict[str, str] = {
         "Create the first plan only once; change it with update_plan ONLY when the user asks "
         "(or agrees after you suggest it because of the plan_update_suggested flag), and "
         "explain what_changed. Map the user's words to the allowed values yourself (5 years of "
-        "training = advanced, a mix of veg and non-veg = non_vegetarian) and save ALL answers in "
+        "training = advanced, a mix of veg and non-veg = non_vegetarian); when you ask a question with a fixed set of answers (diet, equipment, experience, activity, goal), list the options so the user can just pick one, and if a saved value is not recognised, show the options and ask again instead of guessing. Save ALL answers in "
         "ONE save_fitness_profile call; call independent tools together in the same step. Use "
         "the FITNESS MEMORY block (if present) in every fitness "
         "answer: respect the conditions, allergies, diet and equipment in it, compare what "
@@ -363,7 +365,26 @@ class AgentService:
             llm=self._llm,
         )
 
-        response = await self._converse(user_id, message, ctx, profile, today, history)
+        tracer = get_tracer()
+        with external_scope(any(m.external for m in history)), llm_task("agent"), tracer.trace(
+            "agent.chat",
+            user_id=f"u{user_pk}",
+            session_id=f"u{user_pk}:{today.isoformat()}",
+            input=message,
+            metadata={"channel_user": "external" if user_id else "", "history_messages": len(history)},
+        ) as trace:
+            response = await self._converse(user_id, message, ctx, profile, today, history)
+            trace.update(
+                output=response.reply,
+                metadata={
+                    "jev_action": response.decision.action if response.decision else None,
+                    "jev_intents": response.decision.intents if response.decision else None,
+                    "jev_risk": response.decision.risk if response.decision else None,
+                    "tools_used": response.tools_used,
+                    "proposals": len(response.pending_approvals),
+                    "model": response.model,
+                },
+            )
 
         # Only completed turns are remembered: errors and rate limits raise before here.
         await asyncio.to_thread(self._save_turn, user_pk, message, response, now)
@@ -404,6 +425,19 @@ class AgentService:
             decision.blocked_tools,
             decision.fallback,
         )
+
+        with get_tracer().span(
+            "jev.decision",
+            metadata={
+                "action": decision.action,
+                "intents": decision.intents,
+                "risk": decision.risk,
+                "allowed_tools": decision.allowed_tools,
+                "blocked_tools": decision.blocked_tools,
+                "fallback": decision.fallback,
+            },
+        ):
+            pass
 
         if decision.action == "refuse":
             return self._response(REFUSE_REPLY, self._llm.model, decision)

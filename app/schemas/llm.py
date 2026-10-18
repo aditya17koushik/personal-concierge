@@ -25,6 +25,9 @@ class Message(BaseModel):
     # tool messages (the result of a tool call)
     tool_call_id: str | None = None
 
+    # user messages with pictures: data URLs ("data:image/jpeg;base64,...")
+    images: list[str] | None = None
+
 
 class Usage(BaseModel):
     prompt_tokens: int = 0

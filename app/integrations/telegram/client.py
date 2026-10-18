@@ -64,6 +64,8 @@ class TelegramAPI(Protocol):
         self, callback_query_id: str, text: str | None = None
     ) -> None: ...
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None: ...
+    async def get_file(self, file_id: str) -> dict[str, Any]: ...
+    async def download_file(self, file_path: str, max_bytes: int) -> bytes: ...
 
 
 class TelegramClient:
@@ -168,3 +170,24 @@ class TelegramClient:
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         await self._call("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        """File metadata ({"file_path", "file_size", ...}) for a file the user sent."""
+        return await self._call("getFile", {"file_id": file_id})
+
+    async def download_file(self, file_path: str, max_bytes: int) -> bytes:
+        """Download a file the user sent. Refuses anything larger than `max_bytes`."""
+        url = f"{self._base_url}/file/bot{self._token}/{file_path}"
+        try:
+            async with httpx.AsyncClient(transport=self._transport) as client:
+                async with client.stream("GET", url, timeout=self._timeout * 2) as response:
+                    if response.status_code != 200:
+                        raise TelegramError("Could not download the file.", status=response.status_code)
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        data.extend(chunk)
+                        if len(data) > max_bytes:
+                            raise TelegramError("The file is too large.")
+        except httpx.HTTPError as exc:
+            raise TelegramError(f"Could not download the file ({type(exc).__name__}).") from None
+        return bytes(data)

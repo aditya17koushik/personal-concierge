@@ -78,6 +78,21 @@ class FakeTelegram:
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         self.actions.append(chat_id)
 
+    files: dict[str, bytes] = {}
+    file_sizes: dict[str, int] = {}
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        if file_id not in self.files:
+            raise TelegramError("file not found")
+        return {"file_id": file_id, "file_path": f"photos/{file_id}.jpg",
+                "file_size": self.file_sizes.get(file_id, len(self.files[file_id]))}  # fmt: skip
+
+    async def download_file(self, file_path: str, max_bytes: int) -> bytes:
+        data = self.files[file_path.split("/")[-1].removesuffix(".jpg")]
+        if len(data) > max_bytes:
+            raise TelegramError("The file is too large.")
+        return data
+
     @property
     def texts(self) -> list[str]:
         return [m["text"] for m in self.sent]
@@ -177,6 +192,7 @@ def make_rig(
     session_factory: sessionmaker[Session],
     answers: dict[str, Any] = CHAT,
     responses: list[LLMResponse | Exception] | None = None,
+    vision: Any = None,
     **settings_overrides: Any,
 ) -> Rig:
     settings = make_settings(**settings_overrides)
@@ -206,6 +222,7 @@ def make_rig(
         approvals_factory=approvals_factory,
         bot_username="test_bot",
         now_fn=lambda: datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc),  # same day as TODAY
+        vision=vision,
     )
     return Rig(handler, tg, provider, session_factory, settings)
 
@@ -443,7 +460,7 @@ async def test_groups_bots_and_photos(session_factory):
     assert rig.tg.sent == []
 
     await rig.handler.handle(message(None, photo=[{"file_id": "x"}], caption="my lunch"))
-    assert "text messages" in rig.tg.texts[0]
+    assert "not set up" in rig.tg.texts[0]  # no vision model configured in this rig
     assert rig.provider.calls == 0
 
 

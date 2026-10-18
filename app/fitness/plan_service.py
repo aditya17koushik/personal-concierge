@@ -19,6 +19,7 @@ from app.fitness.plans import DAYS, PlanError, PlanGenerator, PlanInputs
 from app.fitness.profile import Computed, FitnessProfileService
 from app.fitness.service import FitnessError, FitnessService
 from app.llm.base import LLMProvider
+from app.observability import get_tracer
 
 MIN_ADAPT_DAYS = 7  # a plan needs a week of data before it is adapted
 STEP_DOWN = 125
@@ -168,10 +169,13 @@ class PlanService:
         import asyncio
 
         inputs, computed = await asyncio.to_thread(self._inputs, user_id, today)
-        workout, meals = await PlanGenerator(provider).both(inputs)
-        return await asyncio.to_thread(
-            self._store, user_id, today, inputs, computed, workout, meals, reason
-        )
+        with get_tracer().span("plan.create", metadata={"user": f"u{user_id}", "reason": reason}) as span:
+            workout, meals = await PlanGenerator(provider).both(inputs)
+            plan = await asyncio.to_thread(
+                self._store, user_id, today, inputs, computed, workout, meals, reason
+            )
+            span.update(metadata={"version": plan.version})
+            return plan
 
     async def update(
         self, user_id: int, today: date, provider: LLMProvider, now: datetime
@@ -198,7 +202,10 @@ class PlanService:
             return inputs, computed, change, age_days
 
         inputs, computed, change, age_days = await asyncio.to_thread(prepare)
-        workout, meals = await PlanGenerator(provider).both(inputs)
+        with get_tracer().span(
+            "plan.update", metadata={"user": f"u{user_id}", "adaptation": change.reasons}
+        ):
+            workout, meals = await PlanGenerator(provider).both(inputs)
 
         old = current.targets
         old_days = current.inputs.get("days_per_week")

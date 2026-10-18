@@ -14,6 +14,11 @@ def message_to_openai(message: Message) -> dict[str, Any]:
     """Convert our Message into the dict format the OpenAI-style API expects."""
     data: dict[str, Any] = {"role": message.role, "content": message.content}
 
+    if message.images:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": message.content or ""}]
+        parts += [{"type": "image_url", "image_url": {"url": url}} for url in message.images]
+        data["content"] = parts
+
     if message.tool_calls:
         data["tool_calls"] = [
             {

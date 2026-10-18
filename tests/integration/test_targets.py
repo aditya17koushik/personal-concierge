@@ -290,7 +290,7 @@ async def test_bad_intake_through_the_tools_is_refused_not_stored(db: Session):
     uid = make_user(db)
     registry = build_default_registry()
     bad = await registry.execute("save_fitness_profile", {"sex": "robot"}, ctx_for(db, uid))
-    assert "must be one of" in bad["error"]
+    assert "not a known sex" in bad["error"] and "male, female, other" in bad["error"]
     invalid = await registry.execute("save_fitness_profile", {"age": 500}, ctx_for(db, uid))
     assert invalid["error"] == "Invalid arguments"
 

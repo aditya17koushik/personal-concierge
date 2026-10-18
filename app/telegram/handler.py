@@ -7,6 +7,7 @@ from typing import Any, Callable, TypeVar
 
 from sqlalchemy.orm import Session
 
+from app.observability import get_tracer
 from app.agent.service import AgentService
 from app.approvals.service import ApprovalError, ApprovalService
 from app.config import Settings
@@ -14,11 +15,18 @@ from app.conversation.service import ConversationService
 from app.integrations.google.links import LoginLinkService
 from app.integrations.telegram.client import TelegramAPI, TelegramError
 from app.llm.base import LLMError
-from app.profiles.service import ProfileError, ProfileService, local_today
+from app.profiles.service import (
+    ProfileError,
+    ProfileService,
+    local_today,
+    seconds_until_local_midnight,
+)
 from app.schemas.approvals import PendingApprovalOut
 from app.telegram.users import InviteError, LinkedUser, TelegramUsers
 from app.coach.service import WEEKDAYS, CoachService
+from app.fitness.photos import FoodDraftService, PhotoAnalyzer, PhotoError
 from app.fitness.plan_service import PlanService, format_plan_today, format_plan_week
+from app.fitness.service import FitnessError, default_meal_type
 from app.fitness.service import (
     FitnessService,
     format_day,
@@ -37,6 +45,7 @@ T = TypeVar("T")
 MAX_TELEGRAM_CHARS = 4000  # hard limit is 4096
 MAX_INPUT_CHARS = 4000
 CALLBACK_RE = re.compile(r"^([ar]):([0-9a-f-]{36})$")
+PHOTO_CB_RE = re.compile(r"^p([ld]):([0-9a-f-]{36})$")  # p l = log it, p d = discard
 REDEEM_WINDOW_SECONDS = 600
 REDEEM_MAX_FAILURES = 5
 
@@ -51,7 +60,8 @@ HELP_TEXT = (
     "- Any unread emails from my bank?\n"
     "- What's on my calendar tomorrow?\n"
     "- Remind me to call Ravi at 6pm\n"
-    "- Had 2 rotis and dal for lunch / I weigh 78.5 / I did a 5 km run\n\n"
+    "- Had 2 rotis and dal for lunch / I weigh 78.5 / I did a 5 km run\n"
+    "- Send a photo of your meal and I will estimate it (you tap Log it)\n\n"
     "Commands:\n"
     "/new - start a fresh conversation (I forget the recent messages)\n"
     "/approvals - changes waiting for your approval\n"
@@ -133,6 +143,24 @@ def split_message(text: str, limit: int = MAX_TELEGRAM_CHARS) -> list[str]:
     return chunks
 
 
+def _photo_of(msg: dict[str, Any]) -> tuple[str, str, int | None] | None:
+    """(file_id, mime, size) of the photo in a message, or None. Telegram sends photos as a list
+    of sizes; take the largest. A document is accepted only when it is an image."""
+    sizes = msg.get("photo")
+    if isinstance(sizes, list) and sizes:
+        best = max(
+            (s for s in sizes if isinstance(s, dict) and s.get("file_id")),
+            key=lambda s: int(s.get("file_size") or 0),
+            default=None,
+        )
+        if best is not None:
+            return str(best["file_id"]), "image/jpeg", best.get("file_size")
+    doc = msg.get("document")
+    if isinstance(doc, dict) and str(doc.get("mime_type", "")).startswith("image/") and doc.get("file_id"):
+        return str(doc["file_id"]), str(doc["mime_type"]), doc.get("file_size")
+    return None
+
+
 def approval_keyboard(approval_id: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -170,7 +198,9 @@ class TelegramHandler:
         bot_username: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         now_fn: Callable[[], datetime] = _utcnow,
+        vision: PhotoAnalyzer | None = None,
     ) -> None:
+        self._vision = vision
         self._client = client
         self._session_factory = session_factory
         self._settings = settings
@@ -247,13 +277,179 @@ class TelegramHandler:
             await self._command(link, chat_id, command, arg)
             return
 
+        photo = _photo_of(msg)
+        if photo is not None:
+            await self._photo(link, chat_id, photo, str(msg.get("caption") or ""))
+            return
+
         if not text:
-            await self._send(
-                chat_id, "I can only read text messages for now. Photos are coming soon."
-            )
+            await self._send(chat_id, "I can read text messages and photos of food.")
             return
 
         await self._chat(link, chat_id, text[:MAX_INPUT_CHARS])
+
+    # ------------------------------------------------------------------ photos
+
+    async def _photo(
+        self, link: LinkedUser, chat_id: int, photo: tuple[str, str, int | None], caption: str
+    ) -> None:
+        """A food photo: estimate it, then WAIT for [Log it]. Nothing is logged by itself."""
+        if self._vision is None:
+            await self._send(chat_id, "Photo analysis is not set up on this server.")
+            return
+        file_id, mime, size = photo
+        limit = self._settings.photo_max_bytes
+        if size is not None and size > limit:
+            await self._send(chat_id, f"That photo is too large (max {limit // 1_000_000} MB).")
+            return
+
+        now = self._now_fn()
+
+        def prepare(db: Session) -> tuple[str, str]:
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            QuotaService(db, self._settings.daily_message_limit).consume(
+                link.user_id, local_today(profile.timezone, now),
+                seconds_until_local_midnight(profile.timezone, now),
+            )  # fmt: skip
+            return profile.timezone, default_meal_type(now, profile.timezone)
+
+        try:
+            tz_name, meal_type = await self._db(prepare)
+        except RateLimitExceeded as exc:
+            await self._send(
+                chat_id,
+                f"You've reached today's limit of {exc.limit} messages. It resets at midnight "
+                f"in your timezone, in about {format_wait(exc.retry_after_seconds)}.",
+            )
+            return
+        del tz_name
+
+        try:
+            await self._client.send_chat_action(chat_id, "typing")
+        except TelegramError:
+            pass
+
+        try:
+            with get_tracer().trace(
+                "photo.analyze", user_id=f"u{link.user_id}", input=caption or None,
+                metadata={"mime": mime, "size_bytes": size},
+            ) as trace:  # the image itself is never sent to Langfuse
+                estimate = await asyncio.wait_for(
+                    self._estimate(file_id, mime, caption, limit),
+                    timeout=self._settings.photo_timeout_seconds,
+                )
+                trace.update(
+                    output=estimate.description if estimate else None,
+                    metadata={
+                        "calories": estimate.calories if estimate else None,
+                        "confidence": estimate.confidence if estimate else None,
+                    },
+                )
+        except asyncio.TimeoutError:
+            await self._send(chat_id, "That took too long. Please send the photo again.")
+            return
+        except PhotoError as exc:
+            await self._send(chat_id, str(exc))
+            return
+        except TelegramError:
+            await self._send(chat_id, "I could not download that photo. Please try again.")
+            return
+        except Exception:
+            logger.exception("Photo analysis failed")
+            await self._send(chat_id, "Something went wrong on my side. Please try again.")
+            return
+
+        if estimate is None:
+            await self._send(chat_id, "I can't see a meal in that photo. Send a clearer photo of your food.")
+            return
+
+        draft = await self._db(
+            lambda db: FoodDraftService(db, self._settings.photo_draft_hours).create(
+                link.user_id, estimate
+            )
+        )
+        macros = ", ".join(
+            f"{v:g} g {label}"
+            for label, v in (("protein", estimate.protein_g), ("carbs", estimate.carbs_g), ("fat", estimate.fat_g))
+            if v is not None
+        )
+        lines = [
+            f"Photo estimate (rough): {estimate.description}",
+            f"About {estimate.calories} kcal" + (f", {macros}" if macros else "") + f". Confidence: {estimate.confidence}.",
+            f"Log it as {meal_type}?",
+        ]  # fmt: skip
+        await self._client.send_message(
+            chat_id,
+            "\n".join(lines),
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "\u2705 Log it", "callback_data": f"pl:{draft.id}"},
+                        {"text": "\u274c Discard", "callback_data": f"pd:{draft.id}"},
+                    ]
+                ]
+            },
+        )
+
+    async def _estimate(self, file_id: str, mime: str, caption: str, limit: int) -> Any:
+        assert self._vision is not None
+        info = await self._client.get_file(file_id)
+        path = str(info.get("file_path") or "")
+        if not path:
+            raise PhotoError("I could not fetch that photo.")
+        if info.get("file_size") and int(info["file_size"]) > limit:
+            raise PhotoError(f"That photo is too large (max {limit // 1_000_000} MB).")
+        data = await self._client.download_file(path, limit)
+        return await self._vision.analyze(data, mime, caption)
+
+    async def _on_photo_callback(
+        self, cq: dict[str, Any], link: LinkedUser, action: str, draft_id: str
+    ) -> None:
+        cq_id = str(cq.get("id", ""))
+        message = cq.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        message_id = message.get("message_id")
+        original = str(message.get("text") or "")
+        now = self._now_fn()
+
+        def run(db: Session) -> str:
+            service = FoodDraftService(db, self._settings.photo_draft_hours)
+            draft = service.get(link.user_id, draft_id)
+            if draft is None:
+                raise FitnessError("That estimate was not found.")
+            if action == "d":
+                if not service.discard(link.user_id, draft_id, now):
+                    raise FitnessError("That estimate was already handled or expired.")
+                return "Discarded."
+            profile = ProfileService(
+                db, self._settings.default_currency, self._settings.default_timezone
+            ).get_or_create(link.user_id)
+            meal = service.confirm(
+                link.user_id, draft_id, today=local_today(profile.timezone, now), now=now,
+                tz_name=profile.timezone,
+            )  # fmt: skip
+            return (
+                f"Logged as {meal.meal_type}: {meal.description} (about {meal.calories} kcal, "
+                "an estimate). To correct it, just tell me, e.g. 'make it 600 calories'."
+            )
+
+        try:
+            result = await self._db(run)
+        except FitnessError as exc:
+            await self._answer(cq_id, str(exc))
+            if chat_id and message_id:
+                await self._edit(chat_id, message_id, f"{original}\n\n\u2139\ufe0f {exc}")
+            return
+
+        get_tracer().event(
+            "photo.logged" if action == "l" else "photo.discarded", metadata={"user": f"u{link.user_id}"}
+        )
+        await self._answer(cq_id, "Done")
+        if chat_id and message_id:
+            icon = "\u2705" if action == "l" else "\u274c"
+            await self._edit(chat_id, message_id, f"{icon} {result}\n\n{original.splitlines()[0] if original else ''}")
 
     # ----------------------------------------------------------------- invites
 
@@ -726,9 +922,11 @@ class TelegramHandler:
     async def _on_callback(self, cq: dict[str, Any]) -> None:
         cq_id = str(cq.get("id", ""))
         sender = cq.get("from") or {}
-        match = CALLBACK_RE.match(cq.get("data") or "")
+        data = cq.get("data") or ""
+        match = CALLBACK_RE.match(data)
+        photo_match = PHOTO_CB_RE.match(data)
 
-        if not match or "id" not in sender:
+        if (not match and not photo_match) or "id" not in sender:
             await self._answer(cq_id, "Unknown action.")
             return
 
@@ -736,6 +934,11 @@ class TelegramHandler:
         if link is None:
             await self._answer(cq_id, "Not authorized.")
             return
+
+        if photo_match:
+            await self._on_photo_callback(cq, link, photo_match.group(1), photo_match.group(2))
+            return
+        assert match is not None
 
         kind, approval_id = match.groups()
         message = cq.get("message") or {}
@@ -760,6 +963,10 @@ class TelegramHandler:
         finally:
             await asyncio.to_thread(db.close)
 
+        get_tracer().event(
+            f"approval.{out.status}",
+            metadata={"user": f"u{link.user_id}", "summary": out.summary},
+        )
         if out.status == "executed":
             text, toast = f"\u2705 Done\n{out.summary}", "Done"
         elif out.status == "rejected":

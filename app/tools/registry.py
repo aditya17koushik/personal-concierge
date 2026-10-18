@@ -6,6 +6,7 @@ from typing import Any, Collection
 
 from pydantic import ValidationError
 
+from app.observability import EXTERNAL_REDACTED, get_tracer, mark_external
 from app.tools.base import Tool, ToolContext, ToolError
 
 logger = logging.getLogger(__name__)
@@ -57,22 +58,37 @@ class ToolRegistry:
         except ValidationError as exc:
             return {"error": "Invalid arguments", "details": _validation_details(exc)}
 
-        try:
-            if inspect.iscoroutinefunction(tool.handler):
-                result = await tool.handler(ctx, args)
-            else:
-                # Sync handlers do blocking database I/O. Run them in a worker
-                # thread so a slow database can never freeze the event loop.
-                result = await asyncio.to_thread(tool.handler, ctx, args)
-                if inspect.isawaitable(result):
-                    result = await result
+        external = tool.domain in ("email", "calendar")
+        if external:
+            mark_external()
+        with get_tracer().span(
+            f"tool:{name}",
+            as_type="tool",
+            input=None if external else arguments,
+            metadata={"domain": tool.domain, "risk": str(tool.risk), "user": f"u{ctx.user_id}"},
+        ) as span:
+            try:
+                if inspect.iscoroutinefunction(tool.handler):
+                    result = await tool.handler(ctx, args)
+                else:
+                    # Sync handlers do blocking database I/O. Run them in a worker
+                    # thread so a slow database can never freeze the event loop.
+                    result = await asyncio.to_thread(tool.handler, ctx, args)
+                    if inspect.isawaitable(result):
+                        result = await result
+            except ToolError as exc:
+                result = {"error": str(exc)}
+            except Exception:
+                logger.exception("Tool %s failed", name)
+                await asyncio.to_thread(ctx.db.rollback)
+                result = {"error": "Tool failed unexpectedly"}
+            failed = isinstance(result, dict) and "error" in result
+            span.update(
+                output=EXTERNAL_REDACTED if external else result,
+                level="ERROR" if failed else None,
+                status_message=str(result.get("error"))[:200] if failed else None,
+            )
             return result
-        except ToolError as exc:
-            return {"error": str(exc)}
-        except Exception:
-            logger.exception("Tool %s failed", name)
-            await asyncio.to_thread(ctx.db.rollback)
-            return {"error": "Tool failed unexpectedly"}
 
     async def prepare(
         self, name: str, arguments: dict[str, Any], ctx: ToolContext
